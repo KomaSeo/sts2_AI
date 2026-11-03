@@ -50,21 +50,21 @@ def _init_worker(make_run: Callable[[], RunSim], cfg: Config, server_args=None) 
 
 
 def _play(run: RunSim, agent: Agent, cfg: Config, seed: int, use_evaluator: bool, collect_grpo: bool, greedy: bool,
-          start=None, probe_weights=None):
+          start=None, probe_weights=None, extras=None):
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)  # 정책 샘플링은 torch 전역 난수를 쓴다. 런마다 고정해야 프로세스와 무관해진다
     return play_run(agent, run, cfg, rng, seed, use_evaluator=use_evaluator, collect_grpo=collect_grpo, greedy=greedy,
-                    start=start, probe_weights=probe_weights)
+                    start=start, probe_weights=probe_weights, extras=extras)
 
 
 def _work(task):
-    version, blob, seed, use_evaluator, collect_grpo, greedy, start, probe_weights = task
+    version, blob, seed, use_evaluator, collect_grpo, greedy, start, probe_weights, extras = task
     agent: Agent = _W["agent"]
     if _W["version"] != version:
         agent.load_state_dict(torch.load(io.BytesIO(blob), map_location="cpu"))
         _W["version"] = version
     snaps, groups, res = _play(_W["run"], agent, _W["cfg"], seed, use_evaluator, collect_grpo, greedy, start,
-                               probe_weights)
+                               probe_weights, extras)
     # 텐서는 numpy 로 바꿔 보낸다. torch 텐서를 그대로 보내면 공유 메모리 핸들로 넘어가서
     # 작은 텐서가 많을 때 Windows 에서 핸들이 쌓인다.
     for g in groups:
@@ -114,15 +114,16 @@ class RunCollector:
                 self.server.load(self._blob)
 
     def collect(self, actor: Agent, seeds: list[int], use_evaluator: bool, collect_grpo: bool = True,
-                greedy: bool = False, starts: list | None = None, probe_weights: dict | None = None) -> list[tuple]:
+                greedy: bool = False, starts: list | None = None, probe_weights: dict | None = None,
+                extras: dict | None = None) -> list[tuple]:
         """starts[i] 가 있으면 i 번째 런은 그 막 시작 상태에서 시작한다. probe_weights: 모의전 적 고르기 가중치."""
         starts = starts or [None] * len(seeds)
         if self.pool is None:
-            return [_play(self.run, actor, self.cfg, s, use_evaluator, collect_grpo, greedy, st, probe_weights)
+            return [_play(self.run, actor, self.cfg, s, use_evaluator, collect_grpo, greedy, st, probe_weights, extras)
                     for s, st in zip(seeds, starts)]
         if self._blob is None:
             self.sync(actor)
-        tasks = [(self._version, self._blob, s, use_evaluator, collect_grpo, greedy, st, probe_weights)
+        tasks = [(self._version, self._blob, s, use_evaluator, collect_grpo, greedy, st, probe_weights, extras)
                  for s, st in zip(seeds, starts)]
         return self.pool.map(_work, tasks, chunksize=1)
 

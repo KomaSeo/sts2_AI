@@ -57,10 +57,12 @@ class _Lib:
 
         self.ct, self.names, self.native, self.rc, self.Sts2RunEnv = ct, names, native, rc, Sts2RunEnv
         self.run_engine = run_engine
-        # 모의전 덱에 넣을 카드 후보: 직업(아이언클래드) 카드 풀 + 무색 카드 풀.
-        # 시뮬레이터의 생성 표(CardPools.g.cs)를 읽는다. sts2_gym.position_sampler 도 같은 표를 읽지만
-        # 시스템 기본 인코딩으로 열어서 Windows(cp949)에서는 실패한다.
-        self.probe_card_pool = sorted(set(_card_pool(repo, "Ironclad")) | set(_card_pool(repo, "Colorless")))
+        # 모의전 덱에 넣을 카드 후보: 직업(아이언클래드) 카드 풀 + 무색 카드 풀 + 저주·상태이상 카드 전부.
+        # 직업·무색은 시뮬레이터의 생성 표(CardPools.g.cs)를 읽는다. sts2_gym.position_sampler 도 같은 표를 읽지만
+        # 시스템 기본 인코딩으로 열어서 Windows(cp949)에서는 실패한다. 저주·상태이상은 카드 종류로 고른다.
+        curse_status = {cid for cid, info in names.cards().items() if info.card_type in ("Curse", "Status")}
+        self.probe_card_pool = sorted(set(_card_pool(repo, "Ironclad")) | set(_card_pool(repo, "Colorless"))
+                                      | curse_status)
         # 로컬 시뮬레이터에 추가한 함수들. 없는 빌드면 기본 비용만 쓰고 인챈트·자원 토큰을 붙이지 않는다.
         # Sts2_GetPileDetails: 카드마다 (지금 비용, 인챈트, 인챈트 수치). Sts2_GetResources: 별·오스티·오브 등.
         def bind(name, args):
@@ -477,20 +479,54 @@ class Sts2Run:
     def probe_card_pool(self) -> list[int]:
         return self.lib.probe_card_pool
 
+    def card_upgradable(self, card_id: int) -> bool:
+        """저주·상태이상 카드는 강화할 수 없다."""
+        info = self.lib.cards.get(int(card_id))
+        return info is not None and info.card_type not in ("Curse", "Status")
+    def raw_state(self) -> dict:
+        """덱 빌딩 재생용 런 상태: 덱 [(id, 강화)], 유물 [id], 골드, 최대 HP (시뮬레이터 id 그대로)."""
+        info = self._info
+        return {"deck": [(int(c["card_id"]), bool(c["upgraded"])) for c in info["deck"]],
+                "relics": [int(r["relic_id"]) for r in info["relic_slots"]],
+                "gold": int(info["gold"]), "max_hp": int(info["player_max_hp"])}
+
+    def raw_card(self, raw_id: int, upgraded: bool) -> Card:
+        return self.lib.card(int(raw_id), bool(upgraded), 0)
+
+    def card_raw(self, vocab_id: int) -> int:
+        """카드 임베딩 인덱스 → 시뮬레이터 카드 id (없으면 0)."""
+        inv = getattr(self.lib, "_card_inv", None)
+        if inv is None:
+            inv = {v: k for k, v in self.lib.ct.VOCAB.card.items()}
+            self.lib._card_inv = inv
+        return int(inv.get(int(vocab_id), 0))
+
+    def relic_vocab(self, raw_id: int) -> int:
+        return int(self.lib.ct.VOCAB.relic.get(int(raw_id), 0))
+
+    def encounter_vocab(self, raw_id: int) -> int:
+        return int(self.lib.ct.VOCAB.encounter.get(int(raw_id), 0))
+
+    def transform_pool(self) -> list[int]:
+        """변환 결과 후보: 직업·무색 카드 (저주·상태이상 제외)."""
+        return [c for c in self.lib.probe_card_pool if self.card_upgradable(c)]
+
     def start_probe(self, seed: int, deck: list[tuple[int, bool]], encounter: int, hp: int,
-                    combats_before: int) -> "Sts2Run | None":
+                    combats_before: int, relics: list[int] | None = None,
+                    max_hp: int | None = None) -> "Sts2Run | None":
         """런을 복제(숨은 난수는 seed 로 재추첨)한 뒤, 그 복제본에서 덱을 바꿔 encounter 와의 전투를 바로 시작한다.
 
-        유물·포션·골드·최대 HP 는 지금 런 그대로. Sts2Run_StartCombat 은 카드를 (id, 강화) 로만 받아서
-        덱 카드의 인챈트와 유물 카운터는 빠진다. 시작하지 못하면 None.
+        유물(relics)·최대 HP(max_hp) 를 주지 않으면 지금 런 그대로. 포션·골드도 지금 런 그대로.
+        Sts2Run_StartCombat 은 카드를 (id, 강화) 로만 받아서 덱 카드의 인챈트와 유물 카운터는 빠진다. 시작하지 못하면 None.
         """
         c = self.clone(seed)
         info = c._info
         ids = [-cid if up else cid for cid, up in deck]
-        relics = [int(r["relic_id"]) for r in info["relic_slots"]]
+        relics = [int(r["relic_id"]) for r in info["relic_slots"]] if relics is None else [int(r) for r in relics]
+        max_hp = int(info["player_max_hp"]) if max_hp is None else int(max_hp)
         pots = [int(p) for p in info["potions"] if p]
         status = c.lib.native.run_start_combat(
-            c.env._run_handle, ids, int(encounter), relics, int(hp), int(info["player_max_hp"]), pots,  # noqa: SLF001
+            c.env._run_handle, ids, int(encounter), relics, int(hp), max_hp, pots,  # noqa: SLF001
             int(info["gold"]), int(combats_before), c.env._run_obs_buf)  # noqa: SLF001
         if status < 0:
             c.close()
@@ -559,6 +595,19 @@ class Sts2Run:
         c._visit = copy.deepcopy(self._visit)
         c._screen_cache = None
         c._origin, c._resample, c._actions = self.snapshot(), seed, []
+        c._sync()
+        return c
+
+    def clone_exact(self) -> Sts2Run:
+        """숨은 난수까지 그대로인 충실한 복사본. 선택지의 결과를 미리 재 볼 때만 쓴다 (탐색에 쓰면 미래를 엿본다)."""
+        c = Sts2Run.__new__(Sts2Run)
+        c.__dict__.update(self.__dict__)
+        c.env = self.env.clone(resample_hidden=False)
+        c._obs, c._info = c.env._obs(), c.env._info()  # noqa: SLF001
+        c._map = MapGraph(**{**self._map.__dict__})
+        c._visit = copy.deepcopy(self._visit)
+        c._screen_cache = None
+        c._origin, c._resample, c._actions = None, None, []
         c._sync()
         return c
 

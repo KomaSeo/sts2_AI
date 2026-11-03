@@ -1,7 +1,10 @@
 """무작위 덱 모의전: AI 가 평소 만들지 않는 덱으로, AI 가 많이 죽는 적과 싸워 보게 한다.
 
 맵 화면에서 가끔(probe_prob) 지금 덱을 바꾼 덱을 만든다.
-- 직업 카드·무색 카드 풀에서 0~probe_add_max 장 무작위로 넣고, 지금 덱에서 0~probe_remove_max 장 무작위로 뺀다.
+- 직업 카드·무색 카드·저주·상태이상 카드 풀에서 0~probe_add_max 장 무작위로 넣고, 지금 덱에서 0~probe_remove_max 장
+  무작위로 뺀다.
+- 무작위 카드 0~probe_upgrade_max 장을 강화하고(저주·상태이상 제외), 강화돼 있던 카드 0~probe_downgrade_max 장의
+  강화를 되돌린다.
 그 덱으로 이번 막의 위험한 적(최근 사망 횟수에 비례해 고름. 보스는 이번 런의 보스만)과 전투를 바로 시작해
 probe_group_size 번 분기해 싸운다.
 
@@ -24,8 +27,13 @@ from .grpo import Trajectory, advantages, play_many
 
 
 def modify_deck(deck: list[tuple[int, bool]], pool: list[int], rng: np.random.Generator, add_max: int,
-                remove_max: int, min_size: int = 5) -> list[tuple[int, bool]]:
-    """지금 덱에서 0~remove_max 장 무작위로 빼고, 풀에서 0~add_max 장 무작위로 넣는다 (넣는 카드는 강화 안 함)."""
+                remove_max: int, min_size: int = 5, upgrade_max: int = 0, downgrade_max: int = 0,
+                upgradable=None) -> list[tuple[int, bool]]:
+    """지금 덱을 무작위로 바꾼다. 순서: 0~remove_max 장 빼기 → 풀에서 0~add_max 장 넣기(강화 안 된 카드) →
+    강화 안 된 카드 중 0~upgrade_max 장 강화 → (그 전부터) 강화돼 있던 카드 중 0~downgrade_max 장 강화 되돌리기.
+
+    upgradable(card_id) 가 False 인 카드(저주·상태이상)는 강화하지 않는다.
+    """
     out = list(deck)
     n_rm = int(rng.integers(0, remove_max + 1))
     n_rm = min(n_rm, max(0, len(out) - min_size))
@@ -33,6 +41,14 @@ def modify_deck(deck: list[tuple[int, bool]], pool: list[int], rng: np.random.Ge
         out.pop(i)
     n_add = int(rng.integers(0, add_max + 1))
     out += [(int(c), False) for c in rng.choice(pool, n_add)] if n_add else []
+    was_up = [i for i, (_, up) in enumerate(out) if up]
+    can_up = [i for i, (c, up) in enumerate(out) if not up and (upgradable is None or upgradable(c))]
+    n_up = min(int(rng.integers(0, upgrade_max + 1)), len(can_up))
+    for i in rng.choice(can_up, n_up, replace=False).tolist() if n_up else []:
+        out[i] = (out[i][0], True)
+    n_down = min(int(rng.integers(0, downgrade_max + 1)), len(was_up))
+    for i in rng.choice(was_up, n_down, replace=False).tolist() if n_down else []:
+        out[i] = (out[i][0], False)
     return out
 
 
@@ -83,7 +99,9 @@ def before_boss(state: RunState, deck, hp: int) -> RunState | None:
 
 def run_probe(agent, run, cfg, rng: np.random.Generator, state: RunState, weights: dict, combats_before: int):
     """모의전 하나. (GRPO 그룹, 평가기 스냅숏 또는 None, 기록) 을 돌려준다. 시작하지 못하면 None."""
-    deck = modify_deck(run.deck_raw(), run.probe_card_pool(), rng, cfg.probe_add_max, cfg.probe_remove_max)
+    deck = modify_deck(run.deck_raw(), run.probe_card_pool(), rng, cfg.probe_add_max, cfg.probe_remove_max,
+                       upgrade_max=cfg.probe_upgrade_max, downgrade_max=cfg.probe_downgrade_max,
+                       upgradable=getattr(run, "card_upgradable", None))
     boss_raw = run.boss_raw()
     enc, is_boss = pick_encounter(weights, state.act, boss_raw, rng)
     max_hp = state.max_hp

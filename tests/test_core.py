@@ -461,3 +461,96 @@ def test_probe_helpers():
     node, _ = make_labels([Snapshot(b, node_labels=[(boss, 0.75)])], batch["node_type"].shape[1], run.vocab.n_acts)
     labeled = (node[0] != -1).nonzero().flatten().tolist()
     assert labeled == [boss] and abs(float(node[0, boss]) - 0.75) < 1e-6
+
+
+def test_probe_upgrade_downgrade():
+    """무작위 강화는 강화 안 된(강화 가능한) 카드만, 되돌리기는 원래 강화돼 있던 카드만 바꾼다."""
+    from sts2ai.train.probe import modify_deck
+
+    rng = np.random.default_rng(1)
+    deck = [(i, i % 2 == 0) for i in range(1, 13)]  # 짝수 id 는 강화돼 있음
+    cursed = {3}  # 강화할 수 없는 카드
+    changed_up = changed_down = 0
+    for _ in range(100):
+        d = modify_deck(deck, [], rng, 0, 0, upgrade_max=5, downgrade_max=5, upgradable=lambda c: c not in cursed)
+        assert [c for c, _ in d] == [c for c, _ in deck]
+        for (c, up0), (_, up1) in zip(deck, d):
+            if up1 and not up0:
+                assert c not in cursed
+                changed_up += 1
+            if up0 and not up1:
+                changed_down += 1
+    assert changed_up > 0 and changed_down > 0
+
+
+class _FakeRun:
+    """덱 빌딩 재생 테스트용: 카드·유물 변환만 흉내 낸다."""
+
+    def __init__(self, vocab):
+        self.v = vocab
+
+    def raw_card(self, c, u):
+        return S.Card(int(c) % (self.v.n_cards - 1) + 1, bool(u), 0, 0.2)
+
+    def relic_vocab(self, r):
+        return int(r) % (self.v.n_relics - 1) + 1
+
+    def card_upgradable(self, c):
+        return c != 99
+
+    def transform_pool(self):
+        return [7]
+
+
+def test_deck_replay_rules():
+    """재생: 외부 변화 적용, 골드 부족이면 못 사기, 상점은 실제 구매 수 + 1 번까지, 뒤따르는 제거·강화."""
+    from sts2ai.agents.deck_builder import DeckBuilder
+    from sts2ai.train.deckbuild import Delta, Episode, ROpt, RScreen, replay
+
+    vocab = ToyRun().vocab
+    builder = DeckBuilder(vocab, 32)
+    run = _FakeRun(vocab)
+
+    def opt(kind, i):
+        return S.ChoiceOption(action=i, kind=kind)
+
+    card = RScreen("card", [ROpt(opt("card.take", 0), Delta(add=[(5, False)])),
+                            ROpt(opt("card.skip", 1), Delta())], ext=Delta(gold=10), act=0, floor=2)
+    shop = RScreen("shop", [ROpt(opt("shop.card", 0), Delta(add=[(6, False)], gold=-500)),  # 너무 비싸서 못 삼
+                            ROpt(opt("shop.remove", 1), Delta(gold=-50), follow=("remove", 1)),
+                            ROpt(opt("shop.leave", 2), Delta())], ext=Delta(), act=0, floor=5, shop_picks=1)
+    rest = RScreen("rest", [ROpt(opt("rest.heal", 0), Delta()), ROpt(opt("rest.smith", 1), Delta(), ("upgrade", 1))],
+                   ext=Delta(relics=[3]), act=0, floor=8)
+    ep = Episode(base={"deck": [(1, False), (2, False), (99, False)], "relics": [1], "gold": 60, "max_hp": 80},
+                 screens=[card, shop, rest], ext_final=Delta(max_hp=5), act=0, floor=9, target_raw=1, is_boss=True)
+    for seed in range(20):
+        torch.manual_seed(seed)
+        rep = replay(builder, run, ep, 1, np.random.default_rng(seed))
+        assert (6, False) not in rep.deck  # 골드 70 으로는 500 짜리를 못 산다
+        assert rep.relics == [1, 3] and rep.max_hp == 85
+        assert rep.gold in (70, 20)  # 제거(50)를 했거나 안 했거나
+        assert (99, True) not in rep.deck  # 강화할 수 없는 카드는 강화되지 않는다
+        shop_picks = [s for s in rep.samples if s.action >= 0 and s.options and s.options[0].kind.startswith("shop.")]
+        assert len(shop_picks) <= 2
+        assert any(s.action == -1 for s in rep.samples)  # 휴식 장소는 가치 학습만
+        assert all(s.after is not None for s in rep.samples if s.action >= 0)  # 선택별 이점용 직후 상태
+
+
+def test_train_state_roundtrip(tmp_path):
+    """학습이 train_state.pt 에 옵티마이저 상태를 저장하고, init_optim 으로 이어받으면 Adam 모멘트가 그대로 온다."""
+    from sts2ai.train.loop import Config, train
+
+    out1 = tmp_path / "a"
+    cfg = Config(iterations=1, runs_per_iter=2, group_size=2, d_model=32, workers=0, warmup_snapshots=0,
+                 device="cpu", out_dir=str(out1))
+    train(ToyRun(), cfg, log=lambda *_: None)
+    ts = torch.load(out1 / "train_state.pt", map_location="cpu", weights_only=False)
+    assert set(ts["optim"]) == {"eval", "policy", "choice", "deck"}
+    assert ts["optim"]["eval"]["state"]  # 평가기는 한 번 이상 업데이트했다
+    msgs = []
+    cfg2 = Config(iterations=1, runs_per_iter=2, group_size=2, d_model=32, workers=0, warmup_snapshots=0,
+                  device="cpu", out_dir=str(tmp_path / "b"), init_ckpt=str(out1 / "agent.pt"),
+                  init_optim=str(out1 / "train_state.pt"))
+    train(ToyRun(), cfg2, log=msgs.append)
+    line = next(m for m in msgs if str(m).startswith("init_optim="))
+    assert "eval" in line and "policy" in line

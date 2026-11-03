@@ -23,13 +23,15 @@ import numpy as np
 import torch
 
 from ..agents import ChoicePolicy, CombatPolicy, Evaluator
+from ..agents.deck_builder import DeckBuilder
 from ..agents.chooser import ExpectedValueChooser
 from ..batching import collate_run
 from ..encoders import SharedEmbeddings
-from ..envs.base import PHASE_COMBAT, PHASE_DONE, PHASE_MAP, RunSim
+from ..envs.base import PHASE_COMBAT, PHASE_DONE, PHASE_MAP, PHASE_OTHER, RunSim
 from ..schema import NODE_BOSS
 from .choice import ChoiceSample, choice_update, pick, rollout_choice_group, screen_options
 from .evaluator_train import RunRecorder, Snapshot, train_evaluator
+from .deckbuild import deck_update
 from .grpo import LocalActor, Trajectory, grpo_update, rollout_group
 
 
@@ -80,16 +82,42 @@ class Config:
     # 0 = 끔. 시뮬레이터에 덱을 지정해 전투를 시작하는 기능(start_probe)이 있는 환경에서만 돈다.
     probe_prob: float = 0.0
     probe_group_size: int = 8  # 모의전 하나를 몇 번 분기해 싸우나 (GRPO 그룹)
-    probe_add_max: int = 5  # 직업·무색 카드 풀에서 넣는 장수 0~이 값
+    probe_add_max: int = 5  # 직업·무색·저주·상태이상 카드 풀에서 넣는 장수 0~이 값
     probe_remove_max: int = 5  # 지금 덱에서 빼는 장수 0~이 값
+    probe_upgrade_max: int = 5  # 강화 안 된 카드 중 강화하는 장수 0~이 값 (저주·상태이상 제외)
+    probe_downgrade_max: int = 5  # 강화된 카드 중 강화를 되돌리는 장수 0~이 값
     probe_hp_min: float = 0.5  # 모의전 HP = 최대 HP × U(이 값, 1)
     probe_eval_frac: float = 0.3  # 평가기 학습 데이터 중 보스 모의전 스냅숏 비율
     probe_buffer_size: int = 600
     probe_decay: float = 0.8  # 적 고르기 가중치(사망 횟수)를 반복마다 이만큼 줄여 최근 사망을 더 본다
+    # 덱 빌딩 모듈 (train/deckbuild.py): 치명적인 적을 대비하는 덱 빌딩을 재생 GRPO 로 따로 학습하고,
+    # 실제 런의 덱이 바뀌는 화면에서 단기 모듈(선택 정책)과 합쳐 고른다. 시뮬레이터에서만 돈다.
+    learn_deck: bool = False
+    deck_group_size: int = 8  # 에피소드 하나를 몇 번 재생해 비교하나
+    deck_fights: int = 8  # 재생 하나의 최종 덱으로 몇 번 싸우나
+    # 덱 빌딩 선택의 이점: "grpo" = 재생 최종 점수의 그룹 z 점수(모든 선택이 같은 값), "td" = 선택 직후 덱 가치 D 의
+    # 상승(정규화), "mix" = 둘의 합
+    deck_adv: str = "mix"
+    deck_hp_min: float = 0.5  # 재생 전투 HP = 최대 HP × U(이 값, 1), 그룹 안에서는 같음
+    deck_trigger_prob: float = 0.5  # 치명적인 적과의 전투가 시작될 때 에피소드를 만들 확률
+    deck_trigger_top: int = 8  # 치명적인 적 = 사망 가중치 상위 몇 개 (보스는 항상 포함)
+    deck_max_episodes: int = 2  # 런 하나에서 만드는 에피소드 최대 수
+    deck_targets_top: int = 2  # 실제 런에서 합칠 때 보스 말고 더 고려할 적 수
+    lr_deck: float = 3e-4
+    # 합치는 비율: 막마다 log β, log γ ~ N(평균, mix_sigma) 를 런마다 뽑고, 런 결과(오른 층 수)로 평균을 옮긴다
+    mix_init_beta: float = 0.5
+    mix_init_gamma: float = 0.5
+    mix_sigma: float = 0.5
+    mix_lr: float = 0.5
     seed: int = 0
     out_dir: str = "runs/latest"
     # 이전 학습의 agent.pt 에서 이어서 시작. 가중치만 불러오고 옵티마이저 상태·평가기 버퍼는 새로 시작한다.
     init_ckpt: str = ""
+    # 이전 학습의 <out_dir>/train_state.pt 에서 옵티마이저 상태(Adam 의 모멘트)와 학습 상태(합치는 비율 분포,
+    # 적별 사망 가중치)를 이어받는다. 없으면 옵티마이저는 새로 시작한다 (재시작 직후 업데이트가 크게 흔들릴 수 있다).
+    init_optim: str = ""
+    # 합치는 비율 분포를 이전 학습의 mix.json 에서 시작 (train_state.pt 가 없는 예전 학습용)
+    init_mix: str = ""
     # 막 시작 상태 풀: 런이 다음 막의 첫 맵 화면에 도착하면 그 상태를 저장하고, 반복마다 일부 런을
     # 1막이 아니라 저장된 막 시작 상태에서(숨은 난수는 새로 뽑아) 시작한다. 뒤쪽 막도 학습 데이터를 받게.
     act_pool_frac: float = 0.5  # 반복당 런 중 풀에서 시작하는 비율 (풀이 비어 있으면 0). 0 = 끔
@@ -107,6 +135,8 @@ class Agent:
         self.evaluator = Evaluator(self.emb)
         self.policy = CombatPolicy(self.emb)
         self.choice = ChoicePolicy(self.emb)
+        # 덱 빌딩 모듈: 자기 임베딩을 따로 가진다 (다른 모듈과 가중치를 공유하지 않음)
+        self.deck = DeckBuilder(vocab, d)
         # 기대값 선택기가 쓸 평가기. None 이면 self.evaluator. 전투 정책은 self.evaluator 의 run_vec 으로
         # 학습됐으므로, 선택기 쪽만 다른 평가기로 바꿔 실험할 때 쓴다.
         self.chooser_evaluator: Evaluator | None = None
@@ -128,12 +158,13 @@ class Agent:
 
     def state_dict(self):
         return {"evaluator": self.evaluator.state_dict(), "policy": self.policy.state_dict(),
-                "choice": self.choice.state_dict()}
+                "choice": self.choice.state_dict(), "deck": self.deck.state_dict()}
 
     def to(self, device) -> "Agent":
         self.evaluator.to(device)
         self.policy.to(device)  # 공유 임베딩은 세 모듈에 같이 들어 있다
         self.choice.to(device)
+        self.deck.to(device)
         return self
 
     def run_vec_with_grad(self, states) -> torch.Tensor:
@@ -150,8 +181,9 @@ class Agent:
     def load_state_dict(self, sd):
         """예전 구조의 가중치도 받는다: 없어진 모듈(미래 막 헤드)은 버리고, 커진 임베딩(노드 종류 9 → 11)은
         있던 줄만 복사하고 새 줄은 초기값을 둔다."""
-        for name, module in (("evaluator", self.evaluator), ("policy", self.policy), ("choice", self.choice)):
-            if name in sd:  # 선택 정책이 생기기 전에 저장한 가중치에는 "choice" 가 없다
+        for name, module in (("evaluator", self.evaluator), ("policy", self.policy), ("choice", self.choice),
+                             ("deck", self.deck)):
+            if name in sd:  # 선택 정책·덱 빌딩 모듈이 생기기 전에 저장한 가중치에는 "choice"·"deck" 이 없다
                 module.load_state_dict(_adapt_state(module.state_dict(), sd[name]))
 
 
@@ -185,12 +217,30 @@ def choose_node(agent: Agent, run: RunSim, rng: np.random.Generator, epsilon: fl
 
 def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, seed: int,
              use_evaluator: bool, collect_grpo: bool = True, greedy: bool = False, start: dict | None = None,
-             probe_weights: dict | None = None):
+             probe_weights: dict | None = None, extras: dict | None = None):
     """start 가 있으면 그 막 시작 상태에서(숨은 난수는 seed 로 새로 뽑아) 시작한다.
 
-    probe_weights: 무작위 덱 모의전에서 적을 고를 가중치 {막: {(encounter, 보스인가): 가중치}} (train/probe.py).
+    probe_weights: 적별 최근 사망 가중치 {막: {(encounter, 보스인가): 가중치}}. 모의전 적 고르기와
+    덱 빌딩 모듈의 치명적인 적 판단에 쓴다.
+    extras["mix"]: 덱 빌딩 모듈과 단기 모듈을 합치는 비율의 분포 {"m_beta": [막별 log β 평균], "m_gamma": [...], "sigma"}.
     """
+    from .deckbuild import (DeckRecorder, combined_pick, deck_relevant, is_deadly,  # noqa: PLC0415
+                            run_deck_group)
     from .probe import run_probe  # noqa: PLC0415
+
+    extras = extras or {}
+    death_w = probe_weights or {}
+    use_deck = cfg.learn_deck and hasattr(run, "clone_exact")
+    deck_samples: list = []
+    deck_info: list[dict] = []
+    n_acts = agent.vocab.n_acts
+    mix = extras.get("mix") or {"m_beta": [float(np.log(cfg.mix_init_beta))] * n_acts,
+                                "m_gamma": [float(np.log(cfg.mix_init_gamma))] * n_acts, "sigma": cfg.mix_sigma}
+    explore_mix = use_deck and collect_grpo and not greedy
+    eps_b = rng.normal(size=n_acts) if explore_mix else np.zeros(n_acts)
+    eps_g = rng.normal(size=n_acts) if explore_mix else np.zeros(n_acts)
+    beta = np.exp(np.asarray(mix["m_beta"]) + mix["sigma"] * eps_b)
+    gamma = np.exp(np.asarray(mix["m_gamma"]) + mix["sigma"] * eps_g)
 
     do_probe = collect_grpo and cfg.probe_prob > 0 and hasattr(run, "start_probe")
     probe_snaps: list[Snapshot] = []
@@ -201,6 +251,7 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
     else:
         run.restore(start, seed)
     start_act, start_floor = run.act, run.floor
+    recorder = DeckRecorder(run) if (use_deck and collect_grpo) else None
     seen_act = run.act
     act_starts: list[tuple[int, dict]] = []
     rec = RunRecorder(agent.vocab.n_acts)
@@ -212,6 +263,8 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
     steps = 0
     while run.phase != PHASE_DONE and steps < 20000:
         steps += 1
+        if recorder is not None:
+            recorder.observe(run, run.choice_options() if run.phase == PHASE_OTHER else None)
         if run.phase == PHASE_MAP and run.act > seen_act:
             # 다음 막의 첫 맵 화면: 막 시작 상태로 저장
             seen_act = run.act
@@ -226,6 +279,15 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
                     is_boss = (run.current_node is not None and run.run_state().map.node_types[run.current_node]
                                == NODE_BOSS)
                     last_enc, last_combat_floor = (run.act, run.encounter_raw(), bool(is_boss)), run.floor
+                    # 치명적인 적과의 전투: 그때까지 기록한 덱 빌딩 화면으로 재생 GRPO 에피소드를 만든다
+                    if (recorder is not None and len(deck_info) < cfg.deck_max_episodes
+                            and is_deadly(death_w, *last_enc, cfg.deck_trigger_top)
+                            and rng.random() < cfg.deck_trigger_prob):
+                        smp, info = run_deck_group(agent, run, cfg, rng, recorder.episode(run, *last_enc[1:]),
+                                                   n_combats - 1)
+                        if info is not None:
+                            deck_samples.extend(smp)
+                            deck_info.append(info)
                 # 전투가 시작될 때 한 번: 이 전투가 어느 노드에서 벌어지고 다음에 뭐가 오는지 (맵 포함)
                 run_vec = agent.run_vec(run.run_state()) if cfg.policy_sees_map else None
                 if collect_grpo and n_combats % cfg.grpo_every_n_combats == 0:
@@ -254,10 +316,17 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
             if not opts:  # 고를 게 없는 화면: 자동 진행
                 run.default_step(rng)
                 continue
+            if recorder is not None and not is_map:
+                recorder.screen(run, opts, rng)  # 덱 빌딩 화면이면 선택지 효과를 재서 기록
             if collect_grpo and len(opts) > 1 and rng.random() < cfg.choice_fork_prob:
                 choice_samples.extend(rollout_choice_group(run, agent, cfg, rng, state, opts, use_evaluator))
                 n_choice_groups += 1
-            i, _ = pick(agent, state, opts, greedy)
+            if use_deck and not is_map and len(opts) > 1 and deck_relevant(opts):
+                # 덱이 바뀌는 화면: 단기 모듈과 덱 빌딩 모듈을 합쳐 고른다
+                i = combined_pick(agent, run, state, opts, death_w, cfg, float(beta[run.act]),
+                                  float(gamma[run.act]), greedy)
+            else:
+                i, _ = pick(agent, state, opts, greedy)
             if is_map:
                 n = opts[i].node
                 rec.visit(run.act, n, state.map.rows[n], state.map.node_types[n] == NODE_BOSS)
@@ -287,7 +356,11 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
               # 전투에서 죽었으면 (막, encounter, 보스인가). 모의전 적 고르기 가중치에 쓴다.
               "death_encounter": last_enc if (run.died and last_enc is not None and run.floor == last_combat_floor)
               else None,
-              "probe_snaps": probe_snaps, "probe_info": probe_info}
+              "probe_snaps": probe_snaps, "probe_info": probe_info,
+              "deck_samples": deck_samples, "deck_info": deck_info,
+              # 합치는 비율 학습용: 이 런에서 뽑은 잡음과 결과 (오른 층 수)
+              "mix_sample": ({"eps_beta": eps_b.tolist(), "eps_gamma": eps_g.tolist(),
+                              "gain": run.floor - start_floor} if explore_mix else None)}
     return snaps, groups, result
 
 
@@ -343,10 +416,32 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
     choice_params = params_with_trunk(agent.choice)
     opt_pol = torch.optim.Adam(pol_params, lr=cfg.lr_policy)
     opt_choice = torch.optim.Adam(choice_params, lr=cfg.lr_choice)
+    opt_deck = torch.optim.Adam(agent.deck.parameters(), lr=cfg.lr_deck)
+    # 합치는 비율의 분포 (막별 log β, log γ 의 평균). 런마다 뽑고 결과로 옮긴다
+    n_acts = vocab.n_acts
+    mix = {"m_beta": [float(np.log(cfg.mix_init_beta))] * n_acts,
+           "m_gamma": [float(np.log(cfg.mix_init_gamma))] * n_acts, "sigma": cfg.mix_sigma}
     buffer: list[Snapshot] = []
     val_buffer: list[Snapshot] = []
     probe_buffer: list[Snapshot] = []  # 보스 모의전 스냅숏 (보스 노드에만 라벨)
     probe_weights: dict[int, dict[tuple[int, bool], float]] = {}  # 막 -> (encounter, 보스인가) -> 최근 사망 횟수
+    optimizers = {"eval": opt_eval, "policy": opt_pol, "choice": opt_choice, "deck": opt_deck}
+    if cfg.init_mix:
+        mix = json.loads(Path(cfg.init_mix).read_text())
+        log(f"init_mix={cfg.init_mix}")
+    if cfg.init_optim:
+        ts = torch.load(cfg.init_optim, map_location="cpu", weights_only=False)
+        loaded = []
+        for k, o in optimizers.items():
+            if k in ts.get("optim", {}):
+                try:
+                    o.load_state_dict(ts["optim"][k])
+                    loaded.append(k)
+                except (ValueError, KeyError, RuntimeError) as e:  # 파라미터 구성이 달라졌으면 그 옵티마이저만 새로
+                    log(f"init_optim: {k} 를 불러오지 못해 새로 시작 ({e})")
+        mix = ts.get("mix", mix)
+        probe_weights = ts.get("death_weights", probe_weights)
+        log(f"init_optim={cfg.init_optim} ({'/'.join(loaded) or '없음'})")
     n_runs = 0
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -371,14 +466,20 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
                     pool = pools[acts[int(rng.integers(len(acts)))]]  # 막을 고르게 고른 뒤 그 막의 상태 하나
                     starts[i] = pool[int(rng.integers(len(pool)))]
             results, groups, choice_samples, probe_info = [], [], [], []
+            deck_samples, deck_info, mix_samples = [], [], []
             for snaps, g, res in collector.collect(actor, seeds, use_evaluator=use_eval, starts=starts,
-                                                   probe_weights=probe_weights):
+                                                   probe_weights=probe_weights, extras={"mix": mix}):
                 n_runs += 1
                 (val_buffer if n_runs % cfg.val_every == 0 else buffer).extend(snaps)
                 groups.extend(g)
                 choice_samples.extend(res.pop("choice_samples", []))
                 probe_buffer.extend(res.pop("probe_snaps", []))
                 probe_info.extend(res.pop("probe_info", []))
+                deck_samples.extend(res.pop("deck_samples", []))
+                deck_info.extend(res.pop("deck_info", []))
+                ms = res.pop("mix_sample", None)
+                if ms is not None:
+                    mix_samples.append(ms)
                 death = res.pop("death_encounter", None)
                 if death is not None:
                     a, enc, is_boss = death
@@ -415,6 +516,17 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
             ch_stats = (choice_update(agent, opt_choice, choice_samples, epochs=cfg.grpo_epochs,
                                       trunk_grad=cfg.trunk_grad, params=choice_params)
                         if cfg.learn_choices else {})
+            deck_stats = (deck_update(agent.deck, opt_deck, deck_samples, epochs=cfg.grpo_epochs)
+                          if cfg.learn_deck else {})
+            if len(mix_samples) >= 4:
+                # 진화 전략: 오른 층 수를 표준화한 점수 z 로 평균을 옮긴다. Δm = lr · σ · mean(z · ε)
+                gain = np.array([m["gain"] for m in mix_samples], dtype=np.float64)
+                if gain.std() > 1e-6:
+                    z = (gain - gain.mean()) / gain.std()
+                    for key, ek in (("m_beta", "eps_beta"), ("m_gamma", "eps_gamma")):
+                        eps = np.array([m[ek] for m in mix_samples])
+                        step = cfg.mix_lr * mix["sigma"] * (z[:, None] * eps).mean(0)
+                        mix[key] = [float(v) for v in np.asarray(mix[key]) + step]
             if actor is not agent:
                 actor.load_state_dict(agent.cpu_state_dict())
             collector.sync(actor)
@@ -436,6 +548,14 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
                 "collect_sec": round(t_collect, 1),
                 "choice_groups": int(sum(r.get("choice_groups", 0) for r in results)),
                 **srv_stats,
+                **({"deck_episodes": len(deck_info),
+                    "deck_boss_eps": sum(d["boss"] for d in deck_info),
+                    "deck_score": float(np.mean([d["score"] for d in deck_info])),
+                    "deck_win": float(np.mean([d["win"] for d in deck_info])),
+                    "deck_spread": float(np.mean([d["score_spread"] for d in deck_info]))} if deck_info else {}),
+                **({"beta": "/".join(f"{np.exp(v):.2f}" for v in mix["m_beta"]),
+                    "gamma": "/".join(f"{np.exp(v):.2f}" for v in mix["m_gamma"])} if cfg.learn_deck else {}),
+                **deck_stats,
                 **({"probes": len(probe_info),
                     "probe_boss": sum(p["boss"] for p in probe_info),
                     "probe_win": float(np.mean([p["win_frac"] for p in probe_info])),
@@ -448,8 +568,12 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
             history.append(row)
             log(" ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()))
             torch.save(agent.cpu_state_dict(), out / "agent.pt")
+            torch.save({"optim": {k: o.state_dict() for k, o in optimizers.items()}, "mix": mix,
+                        "death_weights": probe_weights, "iter": it}, out / "train_state.pt")
             if pools:
                 with open(out / "act_pool.pkl", "wb") as f:
                     pickle.dump(pools, f)
+            if cfg.learn_deck:
+                (out / "mix.json").write_text(json.dumps(mix))
     (out / "history.json").write_text(json.dumps(history, indent=2))
     return agent

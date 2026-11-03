@@ -66,13 +66,20 @@ def play_many(policy_or_actor, sims: list[CombatSim], greedy: bool = False, max_
     """전투 여러 개를 한 스텝씩 같이 진행한다. 아직 안 끝난 전투들의 관측을 한 배치로 묶어 정책을 한 번만 부른다.
 
     배치 1 을 여러 번 부르는 것보다 관측당 계산이 몇 배 빠르다 (배치 8 에서 CPU 약 3배).
+    run_vec 은 [d] (모든 전투가 같은 런 맥락) 또는 [len(sims), d] (전투마다 다른 런 맥락).
     """
     actor = as_actor(policy_or_actor)
-    trs = [Trajectory(run_vec=run_vec) for _ in sims]
+    per_sim = run_vec is not None and run_vec.dim() == 2
+    trs = [Trajectory(run_vec=(run_vec[i] if per_sim else run_vec)) for i in range(len(sims))]
     live = [i for i, s in enumerate(sims) if not s.done]
     while live:
         obs = [sims[i].observe() for i in live]
-        rv = run_vec.unsqueeze(0).expand(len(live), -1) if run_vec is not None else None
+        if run_vec is None:
+            rv = None
+        elif per_sim:
+            rv = run_vec[live]
+        else:
+            rv = run_vec.unsqueeze(0).expand(len(live), -1)
         a, t, lp = actor(obs, rv, greedy)
         nxt = []
         for k, i in enumerate(live):
