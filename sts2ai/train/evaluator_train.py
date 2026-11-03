@@ -1,9 +1,10 @@
 """평가 에이전트 학습 데이터 만들기와 학습.
 
 맵에서 다음 노드를 고르는 순간마다 스냅숏을 남기고, 런이 끝나면 라벨을 붙인다.
-- 노드 라벨: 스냅숏 이후 이 막에서 실제로 지나간 노드들. 죽은 노드 = 1, 살아서 지나간 노드 = 0.
+- 이번 막 노드: 스냅숏 이후 이 막에서 실제로 지나간 노드들. 죽은 노드 = 1, 살아서 지나간 노드 = 0.
   죽은 뒤의 노드는 라벨 없음(중도 절단).
-- 막 라벨: 스냅숏보다 뒤의 막 k 에 실제로 도착했다면 그 막에서 죽었나(1/0). 못 갔으면 라벨 없음.
+- 미래 막 가상 노드: 스냅숏보다 뒤의 막 k 에서 실제로 지나간 층마다 그 막 가상 줄의 같은 층에 0,
+  죽은 층에 1 (보스는 줄의 마지막 = 보스 N/A). 지나가지 못한 층은 라벨 없음.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import torch
 
 from ..agents import Evaluator
 from ..agents.evaluator import IGNORE
-from ..batching import collate_run
+from ..batching import collate_run, future_chain_start, module_device, to_device
 from ..schema import RunState, Vocab
 
 
@@ -24,7 +25,11 @@ class Snapshot:
     state: RunState
     future_nodes: list[int] = field(default_factory=list)
     died_node: int | None = None
-    act_label: list[float] = field(default_factory=list)
+    act_label: list[float] = field(default_factory=list)  # 막 단위 요약 (보정 확인 스크립트용)
+    # 미래 막 가상 노드 라벨: (막 k, 그 막 안의 층 또는 "boss", 0/1)
+    chain_labels: list[tuple[int, int | str, float]] = field(default_factory=list)
+    # 노드에 직접 붙이는 라벨 (노드, 0~1). 무작위 덱 모의전이 보스 노드에 "분기 중 죽은 비율"을 넣는다.
+    node_labels: list[tuple[int, float]] = field(default_factory=list)
 
 
 class RunRecorder:
@@ -33,20 +38,21 @@ class RunRecorder:
     def __init__(self, n_acts: int):
         self.n_acts = n_acts
         self.snaps: list[Snapshot] = []
-        self.visits: list[tuple[int, int]] = []  # (막, 노드)
+        self.visits: list[tuple[int, int, int | None, bool]] = []  # (막, 노드, 층, 보스인가)
         self._marks: list[int] = []  # 스냅숏 시점의 visits 길이
 
     def snapshot(self, state: RunState) -> None:
         self.snaps.append(Snapshot(state))
         self._marks.append(len(self.visits))
 
-    def visit(self, act: int, node: int) -> None:
-        self.visits.append((act, node))
+    def visit(self, act: int, node: int, row: int | None = None, boss: bool = False) -> None:
+        self.visits.append((act, node, row, boss))
 
     def finish(self, died: bool, death_act: int, death_node: int | None) -> list[Snapshot]:
+        last_in_death_act = max((i for i, v in enumerate(self.visits) if v[0] == death_act), default=None)
         for snap, mark in zip(self.snaps, self._marks):
             a = snap.state.act
-            snap.future_nodes = [v for act, v in self.visits[mark:] if act == a]
+            snap.future_nodes = [v for act, v, _, _ in self.visits[mark:] if act == a]
             if died and death_act == a:
                 snap.died_node = death_node
             labels = []
@@ -56,6 +62,14 @@ class RunRecorder:
                 else:
                     labels.append(1.0 if (died and k == death_act) else 0.0)
             snap.act_label = labels
+            chain = []
+            for i in range(mark, len(self.visits)):
+                act, _, row, boss = self.visits[i]
+                if act <= a or row is None:
+                    continue
+                dead_here = died and act == death_act and i == last_in_death_act
+                chain.append((act, "boss" if boss else row, 1.0 if dead_here else 0.0))
+            snap.chain_labels = chain
         return self.snaps
 
 
@@ -67,7 +81,19 @@ def make_labels(snaps: list[Snapshot], n_nodes: int, n_acts: int):
             node[i, v] = 0.0
         if s.died_node is not None and s.died_node in s.future_nodes:
             node[i, s.died_node] = 1.0
-        act[i] = torch.tensor(s.act_label)
+        if s.act_label:  # 모의전 스냅숏에는 막 단위 라벨이 없다
+            act[i] = torch.tensor(s.act_label)
+        for k, row, y in s.chain_labels:
+            pos = future_chain_start(s.state.map, s.state.act, k, n_acts)
+            if pos is None:
+                continue
+            start, R = pos
+            r = R - 1 if row == "boss" else min(int(row), R - 2)  # 보스가 아닌 층은 줄의 마지막 칸을 쓰지 않는다
+            if start + r < n_nodes:
+                node[i, start + r] = y
+        for v, y in s.node_labels:
+            if v < n_nodes:
+                node[i, v] = y
     return node, act
 
 
@@ -78,12 +104,13 @@ def eval_bce(evaluator: Evaluator, snaps: list[Snapshot], vocab: Vocab, batch_si
         return float("nan")
     was = evaluator.training
     evaluator.eval()
+    dev = module_device(evaluator)
     total, n = 0.0, 0
     for start in range(0, len(snaps), batch_size):
         chunk = snaps[start : start + batch_size]
         batch = collate_run([s.state for s in chunk], vocab)
         node_l, act_l = make_labels(chunk, batch["node_type"].shape[1], vocab.n_acts)
-        loss, _ = evaluator.loss(batch, node_l, act_l)
+        loss, _ = evaluator.loss(to_device(batch, dev), node_l.to(dev), act_l.to(dev))
         total += float(loss) * len(chunk)
         n += len(chunk)
     evaluator.train(was)
@@ -106,6 +133,7 @@ def train_evaluator(
     n = 0
     best, best_state = None, None
     epochs_run = 0
+    dev = module_device(evaluator)
     for _ in range(epochs):
         order = list(range(len(buffer)))
         random.shuffle(order)
@@ -113,7 +141,7 @@ def train_evaluator(
             snaps = [buffer[i] for i in order[start : start + batch_size]]
             batch = collate_run([s.state for s in snaps], vocab)
             node_l, act_l = make_labels(snaps, batch["node_type"].shape[1], vocab.n_acts)
-            loss, info = evaluator.loss(batch, node_l, act_l)
+            loss, info = evaluator.loss(to_device(batch, dev), node_l.to(dev), act_l.to(dev))
             optim.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(evaluator.parameters(), 1.0)

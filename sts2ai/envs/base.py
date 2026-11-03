@@ -9,7 +9,7 @@ from typing import Protocol
 
 import numpy as np
 
-from ..schema import CombatObs, RunState, Vocab
+from ..schema import ChoiceOption, CombatObs, RunState, Vocab
 
 PHASE_COMBAT = "combat"
 PHASE_MAP = "map"
@@ -60,6 +60,16 @@ class RunSim(Protocol):
         ...
     def default_step(self, rng: np.random.Generator) -> None:
         """규칙 정책으로 한 번 고른다."""
+        ...
+    def choice_options(self) -> list[ChoiceOption]:
+        """지금 선택 화면의 선택지 (선택 정책 입력). 고를 게 없는 화면(자동 진행)이면 빈 목록이고,
+        그때는 default_step 이 알아서 넘긴다."""
+        ...
+    def snapshot(self) -> dict:
+        """지금 상태를 다른 프로세스에서도 되살릴 수 있는 토큰 (pickle 가능)."""
+        ...
+    def restore(self, token: dict, seed: int) -> None:
+        """토큰의 상태로 돌아간 뒤 숨은 난수를 seed 로 새로 뽑는다."""
         ...
     def clone(self, seed: int) -> RunSim:
         """숨은 난수(무작위 변환·강화 결과, 앞으로의 보상 등)를 다시 뽑은 복사본."""

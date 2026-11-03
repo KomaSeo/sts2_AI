@@ -481,6 +481,15 @@ class ToyRun:
         self.screen: dict | None = None
         self.phase = PHASE_MAP
 
+    def snapshot(self) -> dict:
+        """지금 상태 (pickle 가능). restore 로 다른 프로세스에서도 되살릴 수 있다."""
+        return {"state": copy.deepcopy(self.__dict__), "act": self.act, "floor": self.floor}
+
+    def restore(self, token: dict, seed: int) -> None:
+        """토큰의 상태로 돌아간 뒤 숨은 난수를 seed 로 새로 뽑는다."""
+        self.__dict__.update(copy.deepcopy(token["state"]))
+        self.rng = random.Random(seed)
+
     def clone(self, seed: int) -> ToyRun:
         """숨은 난수를 다시 뽑은 복사본. 이미 공개된 것(덱, 화면의 선택지)은 그대로다."""
         c = copy.deepcopy(self)
@@ -639,6 +648,36 @@ class ToyRun:
         if k == "deck":
             return list(sc["eligible"])
         raise ValueError(k)
+
+    def choice_options(self) -> list[S.ChoiceOption]:
+        """선택 정책 입력. 행동 번호는 choice_actions 와 같다."""
+        sc = self.screen
+        k = sc["kind"]
+        O = S.ChoiceOption
+        opts = []
+        for a in self.choice_actions():
+            if k == "card_reward":
+                opts.append(O(a, "card.take", card=self._card(sc["cards"][a])) if a < len(sc["cards"])
+                            else O(a, "card.skip"))
+            elif k == "rest":
+                opts.append(O(a, "rest.heal" if a == 0 else "rest.smith"))
+            elif k == "shop":
+                n = len(sc["cards"])
+                if a < n:
+                    opts.append(O(a, "shop.card", card=self._card(sc["cards"][a]), price=SHOP_CARD_PRICE))
+                elif a == n:
+                    opts.append(O(a, "shop.remove", price=SHOP_REMOVE_PRICE))
+                else:
+                    opts.append(O(a, "shop.leave"))
+            elif k == "event_transform":
+                opts.append(O(a, "event.option", event=1, event_option=a))
+            elif k == "event_relic":
+                opts.append(O(a, "reward.relic", relic=sc["relics"][a]) if a < len(sc["relics"])
+                            else O(a, "reward.proceed"))
+            else:  # deck
+                kind = {"remove": "select.remove", "upgrade": "select.upgrade", "transform": "select.transform"}
+                opts.append(O(a, kind[sc["op"]], deck_index=a))
+        return opts
 
     def describe(self, a: int) -> str:
         sc = self.screen

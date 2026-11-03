@@ -24,6 +24,9 @@ class CombatEncoder(nn.Module):
         self.emb = emb
         self.token_type = nn.Embedding(S.N_TOKEN_TYPES, d)
         self.owner = nn.Embedding(MAX_OWNERS, d)
+        # 공유 임베딩에 없는 것: 오브 종류, 캐릭터 자원 종류 (전투에서만 쓰인다)
+        self.orb = nn.Embedding(S.N_ORB_KINDS, d, padding_idx=0)
+        self.resource = nn.Embedding(S.N_RESOURCE_KINDS, d, padding_idx=0)
         self.feat = nn.Linear(S.N_COMBAT_FEATURES, d)
         self.run_proj = nn.Linear(d, d)
         self.body = set_transformer(d, layers, heads)
@@ -47,6 +50,8 @@ class CombatEncoder(nn.Module):
             + table(e.relic, (S.TYPE_RELIC,))
             + table(e.potion, (S.TYPE_POTION,))
             + table(e.encounter, (S.TYPE_GLOBAL,))
+            + table(self.orb, (S.TYPE_ORB,))
+            + table(self.resource, (S.TYPE_RESOURCE,))
         )
 
     def forward(self, batch: dict, run_vec: torch.Tensor | None = None) -> torch.Tensor:
@@ -62,6 +67,12 @@ class CombatEncoder(nn.Module):
             + self.feat(batch["feats"])
             + self._id_embedding(types, batch["ids"])
         )
+        if "enchants" in batch:  # 카드 토큰의 인챈트 (공유 임베딩: 덱 인코더와 같은 벡터)
+            is_card = torch.zeros_like(types, dtype=torch.bool)
+            for k in S.CARD_TOKEN_TYPES:
+                is_card |= types == k
+            ench = batch["enchants"].clamp(0, self.emb.enchant.num_embeddings - 1)
+            x = x + self.emb.enchant(ench) * is_card.unsqueeze(-1)
         mask = batch["tok_mask"]
         T = x.shape[1]
         if run_vec is not None:

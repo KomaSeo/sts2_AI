@@ -40,3 +40,12 @@ class RunEncoder(nn.Module):
         nodes = self.map(batch, ctx)
         run_vec = self.with_map(torch.cat([ctx, self.map.summary(nodes, batch)], dim=-1))
         return ctx, nodes, run_vec
+
+    def encode_all(self, batch: dict) -> dict[str, torch.Tensor]:
+        """선택 정책용: ctx, 노드 벡터, run_vec 에 더해 덱의 카드별 벡터 [B,N,d] 까지."""
+        deck, deck_tokens = self.deck(batch)
+        boss = self.emb.encounter(batch["boss"]) + self.emb.act(batch["act"])
+        ctx = self.fuse(torch.cat([deck, self.items(batch), self.status(batch), boss], dim=-1))
+        nodes = self.map(batch, ctx)
+        run_vec = self.with_map(torch.cat([ctx, self.map.summary(nodes, batch)], dim=-1))
+        return {"ctx": ctx, "nodes": nodes, "run_vec": run_vec, "deck_tokens": deck_tokens}

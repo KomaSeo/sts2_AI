@@ -22,7 +22,10 @@ NODE_RELIC = 5  # 보물
 NODE_BOSS = 6
 NODE_EVENT = 7
 NODE_ANCIENT = 8
-N_NODE_TYPES = 9
+# 아직 맵이 공개되지 않은 미래 막의 가상 노드 (평가기 전용). 미래 막 하나 = N/A 노드 한 줄 + 끝의 보스 N/A.
+NODE_NA = 9
+NODE_BOSS_NA = 10
+N_NODE_TYPES = 11
 
 # 전투가 벌어지는 방. 이벤트도 전투가 날 수 있지만 위험도는 평가기가 배운다.
 COMBAT_NODES = (NODE_NORMAL, NODE_ELITE, NODE_BOSS)
@@ -114,6 +117,9 @@ class RunState:
     potions: list[int]  # potion id, 빈 칸은 0
     map: MapGraph | None
     boss: int = 0  # 이 막의 보스 encounter id (게임이 막 시작부터 알려 줌)
+    # 간선으로 이어지지 않은 다음 줄 노드로 건너뛸 수 있는 남은 횟수 (날개 달린 부츠). 평가기의 생존 계산이
+    # 이 횟수만큼 "다음 줄 아무 노드로" 가는 길도 본다.
+    map_jumps: int = 0
 
     def with_combat_result(self, hp: int, potions: list[int]) -> RunState:
         """전투 직후 상태 근사: HP 와 포션만 바뀐다고 본다 (보상은 아직 모름)."""
@@ -129,7 +135,50 @@ class RunState:
             potions=potions,
             map=self.map,
             boss=self.boss,
+            map_jumps=self.map_jumps,
         )
+
+
+# ---- 전투·맵 밖 선택지 ----
+# 선택지 종류. 실제 시뮬레이터의 선택지 종류(rl/run_train/features.py OPTION_KINDS)와 같은 이름을 쓰고,
+# 맵 노드와 토이 게임에만 있는 것을 더했다. 목록에 없는 종류는 0 ("other") 으로 본다.
+CHOICE_KINDS = (
+    "other",
+    "map.node",
+    "neow.relic",
+    "card.take", "card.skip", "card.sacrifice", "card.reroll",
+    "reward.potion", "reward.relic", "reward.card", "reward.potion_swap", "reward.proceed",
+    "shop.card", "shop.relic", "shop.potion", "shop.potion_swap", "shop.remove", "shop.leave",
+    "rest.heal", "rest.smith", "rest.lift", "rest.dig", "rest.cook", "rest.hatch", "rest.kindle", "rest.clone",
+    "rest.leave",
+    "event.option",
+    "select.offer", "select.offer_done", "select.upgrade", "select.remove", "select.transform",
+    "select.transform_to", "select.enchant", "select.duplicate",
+    "bundle.pick", "sphere.cell", "merchant.throw", "unknown",
+)
+CHOICE_KIND_INDEX = {k: i for i, k in enumerate(CHOICE_KINDS)}
+N_EVENT_IDS = 128  # 이벤트 id 임베딩 크기 (넘는 id 는 나머지로 접는다)
+
+
+@dataclass
+class ChoiceOption:
+    """선택 화면의 선택지 하나. 신경망 입력과, 고른 뒤 시뮬레이터에 보낼 행동 번호를 함께 담는다.
+
+    모든 id 는 임베딩 인덱스(0 = 없음)다. node 는 RunState.map 의 노드 인덱스, deck_index 는
+    RunState.deck 의 위치다 (-1 = 해당 없음).
+    """
+
+    action: int  # 시뮬레이터 행동 번호 (맵이면 노드 인덱스)
+    kind: str = "other"
+    card: Card | None = None  # 얻거나 사는 카드
+    cards: list[Card] = field(default_factory=list)  # 묶음으로 얻는 카드 (bundle.pick)
+    relic: int = 0
+    potion: int = 0
+    node: int = -1
+    deck_index: int = -1  # 덱에서 고르는 카드 (제거·강화·변환 등)
+    price: int = 0
+    event: int = 0
+    event_option: int = 0
 
 
 # ---- 전투 토큰 (r33hab/sts2 의 rl/combat_tokens.py 와 같은 규약) ----
@@ -151,7 +200,13 @@ TYPE_RELIC = 14
 TYPE_INTENT = 15
 TYPE_INTENT_NEXT = 16
 TYPE_RUN = 17  # 런 맥락(맵 포함) 토큰. CombatEncoder 가 맨 뒤에 붙인다. 시뮬레이터 관측에는 없다.
-N_TOKEN_TYPES = 18
+# 어댑터가 붙이는 토큰 (combat_tokens 에는 없다)
+TYPE_ORB = 18  # 오브 하나: ids = 오브 종류 + 1, F_MAGNITUDE = 패시브 값, F_INTENT_MAG = 발동 값
+TYPE_RESOURCE = 19  # 캐릭터 자원 하나: ids = RESOURCE_* 종류, 값은 F_MAGNITUDE (오스티는 HP 칸)
+N_TOKEN_TYPES = 20
+RESOURCE_GOLD, RESOURCE_MAX_ENERGY, RESOURCE_ORB_SLOTS, RESOURCE_STARS, RESOURCE_OSTY = 1, 2, 3, 4, 5
+N_RESOURCE_KINDS = 8
+N_ORB_KINDS = 16
 
 # 토큰 종류별로 ids 가 어느 임베딩 테이블을 가리키는지
 CARD_TOKEN_TYPES = (TYPE_HAND, TYPE_DRAW, TYPE_DISCARD, TYPE_EXHAUST, TYPE_SELECT, TYPE_HAND_LOCKED)
@@ -197,6 +252,8 @@ class CombatObs:
     enemy_tokens: np.ndarray  # int64 [E]
     enemy_slots: np.ndarray  # int64 [E]
     enemy_alive: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
+    # 카드 토큰의 인챈트 (임베딩 인덱스, 0 = 없음). None 이면 모두 0.
+    enchants: np.ndarray | None = None  # int64 [T]
 
     def __len__(self) -> int:
         return len(self.types)

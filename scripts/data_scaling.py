@@ -23,7 +23,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sts2ai.agents.evaluator import IGNORE  # noqa: E402
-from sts2ai.batching import collate_run  # noqa: E402
+from sts2ai.batching import collate_run, future_chain_start  # noqa: E402
 from sts2ai.envs.toy import ToyRun  # noqa: E402
 from sts2ai.train.evaluator_train import Snapshot, eval_bce, make_labels  # noqa: E402
 from sts2ai.train.loop import Agent, Config, play_run  # noqa: E402
@@ -44,23 +44,30 @@ def collect(agent: Agent, run, seeds: list[int], rng) -> list[list[Snapshot]]:
 
 @torch.no_grad()
 def event_preds(evaluator, runs: list[list[Snapshot]], vocab):
-    """사건 단위(들어가기 직전 마지막 예측) 노드/막 예측과 라벨."""
+    """사건 단위(들어가기 직전 마지막 예측) 예측과 라벨: 이번 막 노드 / 미래 막 층(가상 노드) / 미래 막 전체(참고)."""
     evaluator.eval()
-    node, act = {}, {}
+    node, chain, act = {}, {}, {}
     for r, snaps in enumerate(runs):
         if not snaps:
             continue
         batch = collate_run([s.state for s in snaps], vocab)
         ev = evaluator(batch)
         nl, al = make_labels(snaps, batch["node_type"].shape[1], vocab.n_acts)
+        cm = batch["chain_mask"]
         for b, s in enumerate(snaps):
             for v in (nl[b] != IGNORE).nonzero().flatten().tolist():
-                node[(r, s.state.act, v)] = (float(ev.hazard[b, v]), float(nl[b, v]))
+                pair = (float(ev.hazard[b, v]), float(nl[b, v]))
+                if cm[b, v]:
+                    k = int(batch["node_act"][b, v])
+                    start, _ = future_chain_start(s.state.map, s.state.act, k, vocab.n_acts)
+                    chain[(r, k, v - start)] = pair  # 같은 층은 나중(들어가기 직전) 예측이 덮어쓴다
+                else:
+                    node[(r, s.state.act, v)] = pair
             for k in (al[b] != IGNORE).nonzero().flatten().tolist():
                 act[(r, k)] = (float(ev.p_act[b, k]), float(al[b, k]))
     evaluator.train()
     to_np = lambda d: (np.array([p for p, _ in d.values()]), np.array([y for _, y in d.values()]))  # noqa: E731
-    return to_np(node), to_np(act)
+    return to_np(node), to_np(chain), to_np(act)
 
 
 def metrics(pred: np.ndarray, y: np.ndarray) -> dict:
@@ -133,7 +140,7 @@ def main() -> None:
 
     run = ToyRun()
     collector = Agent(run.vocab, args.d_model)
-    collector.load_state_dict(torch.load(args.ckpt))
+    collector.load_state_dict(torch.load(args.ckpt, map_location="cpu"))
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
     t0 = time.time()
@@ -150,8 +157,8 @@ def main() -> None:
         train = [s for r in train_runs[:n] for s in r]
         deaths = sum(1 for r in train_runs[:n] if r and r[-1].died_node is not None)
         ev, epochs, val_loss = train_fresh(run.vocab, train, val, args.d_model, args.max_epochs, args.patience, seed=0)
-        (tn, ty), (ta, tay) = event_preds(ev, train_runs[:n], run.vocab)
-        (nn_, ny), (na, nay) = event_preds(ev, test_runs, run.vocab)
+        (tn, ty), (tc, tcy), (ta, tay) = event_preds(ev, train_runs[:n], run.vocab)
+        (nn_, ny), (nc, ncy), (na, nay) = event_preds(ev, test_runs, run.vocab)
         row = {
             "train_runs": n,
             "train_snapshots": len(train),
@@ -160,19 +167,23 @@ def main() -> None:
             "val_loss": val_loss,
             "node_train": metrics(tn, ty),
             "node_test": metrics(nn_, ny),
-            "act_train": metrics(ta, tay),
+            "chain_train": metrics(tc, tcy),  # 미래 막 층 단위 (평가기가 학습하는 단위)
+            "chain_test": metrics(nc, ncy),
+            "act_train": metrics(ta, tay),  # 미래 막 전체 (참고)
             "act_test": metrics(na, nay),
             "sec": round(time.time() - t, 1),
         }
         results.append(row)
-        nt, at = row["node_test"], row["act_test"]
+        nt, ct, at = row["node_test"], row["chain_test"], row["act_test"]
         print(
             f"n={n:4d} snaps={len(train):5d} 학습셋사망={deaths:3d} ep={epochs:2d} | "
             f"노드 test BCE {nt['bce']:.3f} (상수 {nt['bce_const']:.3f}) ECE {nt['ece']:.3f} "
             f"0.7↑ {nt['hi_n']}개 예측 {nt['hi_pred']:.2f}/실제 {nt['hi_actual']:.2f} "
             f"train BCE {row['node_train']['bce']:.3f} | "
-            f"막 test BCE {at.get('bce', float('nan')):.3f} (상수 {at.get('bce_const', float('nan')):.3f}) "
-            f"ECE {at.get('ece', float('nan')):.3f} | {row['sec']}초",
+            f"미래 막 층 test BCE {ct.get('bce', float('nan')):.3f} (상수 {ct.get('bce_const', float('nan')):.3f}) "
+            f"ECE {ct.get('ece', float('nan')):.3f} | "
+            f"미래 막 전체 test BCE {at.get('bce', float('nan')):.3f} (상수 {at.get('bce_const', float('nan')):.3f}) "
+            f"| {row['sec']}초",
             flush=True,
         )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

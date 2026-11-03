@@ -2,9 +2,11 @@
 
     python scripts/benchmark.py            # 결과를 화면에 출력
     python scripts/benchmark.py --json out.json
+    python scripts/benchmark.py --workers 8   # 런 플레이를 워커 8개로 나눴을 때 속도도 잰다 (-1 = 자동)
 
 각 항목은 학습 루프에서 시간을 실제로 쓰는 부분이다.
 1) 런 플레이 (전투 정책 + 맵 선택, GRPO 없음)        — 평가기 데이터 수집 속도
+   --workers 를 주면 워커 프로세스로 나눈 속도(runs_per_sec[workers=N])도 잰다.
 2) GRPO 분기 전투 롤아웃                              — 전투 정책 학습 데이터 수집 속도
 3) 평가기 학습 스텝 (배치 64)                          — CPU 와 GPU(있으면) 둘 다
 4) 전투 정책 GRPO 업데이트 스텝 (배치 256)             — CPU 와 GPU(있으면) 둘 다
@@ -26,6 +28,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sts2ai.batching import collate_combat, collate_run  # noqa: E402
+from sts2ai.train.collect import RunCollector, default_workers  # noqa: E402
 from sts2ai.envs.toy import ToyRun  # noqa: E402
 from sts2ai.train.evaluator_train import make_labels  # noqa: E402
 from sts2ai.train.grpo import play  # noqa: E402
@@ -58,6 +61,7 @@ def main() -> None:
     p.add_argument("--json")
     p.add_argument("--runs", type=int, default=20)
     p.add_argument("--threads", type=int, default=1, help="PyTorch 스레드 수 (0 이면 PyTorch 기본값)")
+    p.add_argument("--workers", type=int, default=0, help="런 플레이 워커 수. 0 = 재지 않음, -1 = 자동")
     args = p.parse_args()
     if args.threads > 0:
         torch.set_num_threads(args.threads)
@@ -83,6 +87,15 @@ def main() -> None:
         snaps_all.extend(s)
     dt = time.perf_counter() - t
     res["runs_per_sec"] = args.runs / dt
+
+    # 1') 같은 런 플레이를 워커 프로세스로 나눠서 (프로세스 시작 시간은 빼고 잰다)
+    if args.workers:
+        n_w = args.workers if args.workers > 0 else default_workers(os.cpu_count() or 1)
+        with RunCollector(cfg, n_w, make_run=ToyRun) as col:
+            col.collect(agent, [0] * n_w, use_evaluator=True, collect_grpo=False)  # 워커 준비·워밍업
+            t = time.perf_counter()
+            col.collect(agent, [1000 + i for i in range(args.runs)], use_evaluator=True, collect_grpo=False)
+            res[f"runs_per_sec[workers={n_w}]"] = args.runs / (time.perf_counter() - t)
 
     # 2) GRPO 분기 롤아웃
     run.reset(7)

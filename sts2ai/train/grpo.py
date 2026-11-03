@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from ..agents import CombatPolicy, Evaluator
-from ..batching import collate_combat, collate_run
+from ..batching import collate_combat, collate_run, module_device, to_device
 from ..envs.base import CombatSim, RunSim
 from ..schema import CombatObs, RunState
 
@@ -34,28 +34,71 @@ class Trajectory:
     potions: list[int] = field(default_factory=list)
     score: float = 0.0
     advantage: float = 0.0
-    run_vec: torch.Tensor | None = None  # [d] 전투 시작 시점의 런 맥락 (맵 포함). 전투 내내 같다.
+    # [d] 전투 시작 시점의 런 맥락 (맵 포함). 전투 내내 같다.
+    # 워커 프로세스에서 돌려받을 때는 numpy 배열일 수 있다 (grpo_update 가 둘 다 받는다).
+    run_vec: torch.Tensor | np.ndarray | None = None
+    # 전투 시작 시점의 런 상태. trunk_grad 로 학습할 때 run_vec 을 기울기와 함께 다시 계산하는 데 쓴다.
+    run_state: RunState | None = None
+    # 전투가 끝난 뒤의 실제 런 상태 (런 전체를 복제한 분기만 준다). 없으면 채점은 HP·포션만 바꿔 넣는 근사.
+    post_state: RunState | None = None
 
 
-def play(policy: CombatPolicy, sim: CombatSim, greedy: bool = False, max_steps: int = 300,
+class LocalActor:
+    """전투 정책을 이 프로세스에서 바로 돌리는 actor. actor(관측 목록, run_vec [B,d] 또는 None, greedy) → (행동, 타깃, log 확률)."""
+
+    def __init__(self, policy: CombatPolicy):
+        self.policy = policy
+
+    def __call__(self, obs: list[CombatObs], run_vec: torch.Tensor | None, greedy: bool = False):
+        dev = module_device(self.policy)
+        batch = to_device(collate_combat(obs), dev)
+        rv = run_vec.to(dev) if run_vec is not None else None
+        a, t, lp = self.policy.act(batch, greedy=greedy, run_vec=rv)
+        return a.cpu(), t.cpu(), lp.cpu()
+
+
+def as_actor(policy_or_actor):
+    return LocalActor(policy_or_actor) if isinstance(policy_or_actor, CombatPolicy) else policy_or_actor
+
+
+def play_many(policy_or_actor, sims: list[CombatSim], greedy: bool = False, max_steps: int = 300,
+              run_vec: torch.Tensor | None = None) -> list[Trajectory]:
+    """전투 여러 개를 한 스텝씩 같이 진행한다. 아직 안 끝난 전투들의 관측을 한 배치로 묶어 정책을 한 번만 부른다.
+
+    배치 1 을 여러 번 부르는 것보다 관측당 계산이 몇 배 빠르다 (배치 8 에서 CPU 약 3배).
+    """
+    actor = as_actor(policy_or_actor)
+    trs = [Trajectory(run_vec=run_vec) for _ in sims]
+    live = [i for i, s in enumerate(sims) if not s.done]
+    while live:
+        obs = [sims[i].observe() for i in live]
+        rv = run_vec.unsqueeze(0).expand(len(live), -1) if run_vec is not None else None
+        a, t, lp = actor(obs, rv, greedy)
+        nxt = []
+        for k, i in enumerate(live):
+            ai, ti = int(a[k]), int(t[k])
+            o, tr = obs[k], trs[i]
+            tr.obs.append(o)
+            tr.actions.append(ai)
+            tr.targets.append(ti)
+            tr.logp.append(float(lp[k]))
+            sims[i].step(ai, int(o.enemy_slots[ti]) if ti >= 0 else -1)
+            if not sims[i].done and len(tr.actions) < max_steps:
+                nxt.append(i)
+        live = nxt
+    for tr, sim in zip(trs, sims):
+        tr.won = sim.won and sim.done
+        tr.hp = sim.hp()
+        tr.potions = sim.potions()
+        if hasattr(sim, "post_state"):
+            tr.post_state = sim.post_state()
+        sim.close()
+    return trs
+
+
+def play(policy_or_actor, sim: CombatSim, greedy: bool = False, max_steps: int = 300,
          run_vec: torch.Tensor | None = None) -> Trajectory:
-    tr = Trajectory(run_vec=run_vec)
-    rv = run_vec.unsqueeze(0) if run_vec is not None else None
-    while not sim.done and len(tr.actions) < max_steps:
-        o = sim.observe()
-        a, t, lp = policy.act(collate_combat([o]), greedy=greedy, run_vec=rv)
-        a, t = int(a), int(t)
-        slot = int(o.enemy_slots[t]) if t >= 0 else -1
-        tr.obs.append(o)
-        tr.actions.append(a)
-        tr.targets.append(t)
-        tr.logp.append(float(lp))
-        sim.step(a, slot)
-    tr.won = sim.won and sim.done
-    tr.hp = sim.hp()
-    tr.potions = sim.potions()
-    sim.close()
-    return tr
+    return play_many(policy_or_actor, [sim], greedy, max_steps, run_vec)[0]
 
 
 DEATH_MARGIN = 3.0  # 전투에서 죽은 시행의 점수 = (살아남은 시행 중 최저 log V) - 3 nat
@@ -76,7 +119,8 @@ def score_outcomes(
         return [0.5 + 0.5 * t.hp / max(1, base.max_hp) if t.won else 0.0 for t in trajs]
     if not alive:
         return [0.0] * len(trajs)
-    posts = [base.with_combat_result(trajs[i].hp, trajs[i].potions) for i in alive]
+    # 런 전체를 복제한 분기면 전투 뒤 실제 런 상태(덱·골드·최대 HP·유물 카운터 변화 포함), 아니면 HP·포션만 바꾼 근사
+    posts = [trajs[i].post_state or base.with_combat_result(trajs[i].hp, trajs[i].potions) for i in alive]
     logv = evaluator(collate_run(posts, vocab)).log_run_value.double().tolist()
     death = min(logv) - DEATH_MARGIN
     scores = [death] * len(trajs)
@@ -100,7 +144,7 @@ def advantages(scores: list[float], mode: str = "zscore") -> list[float]:
 
 def rollout_group(
     run: RunSim,
-    policy: CombatPolicy,
+    policy,  # CombatPolicy 또는 actor
     evaluator: Evaluator | None,
     group_size: int,
     rng: np.random.Generator,
@@ -109,9 +153,11 @@ def rollout_group(
 ) -> list[Trajectory]:
     """지금 런이 서 있는 전투를 group_size 번 분기해서 굴리고 점수와 이점을 매긴다."""
     base = run.run_state()
-    trajs = [play(policy, run.fork_combat(int(rng.integers(2**31))), run_vec=run_vec) for _ in range(group_size)]
+    forks = [run.fork_combat(int(rng.integers(2**31))) for _ in range(group_size)]
+    trajs = play_many(policy, forks, run_vec=run_vec)  # 분기들을 같이 진행 (정책 호출을 묶는다)
     for t, sc in zip(trajs, score_outcomes(evaluator, base, trajs, run.vocab)):
         t.score = sc
+        t.run_state = base
     for t, a in zip(trajs, advantages([t.score for t in trajs], mode)):
         t.advantage = a
     return trajs
@@ -125,8 +171,14 @@ def grpo_update(
     clip: float = 0.2,
     ent_coef: float = 0.01,
     minibatch: int = 256,
+    run_vec_fn=None,
+    params=None,
 ) -> dict:
-    """PPO 식 clipped objective. 각 시행 안에서는 스텝 평균, 그다음 시행들 평균 (GRPO)."""
+    """PPO 식 clipped objective. 각 시행 안에서는 스텝 평균, 그다음 시행들 평균 (GRPO).
+
+    run_vec_fn(states) 를 주면 저장해 둔 run_vec 대신 전투 시작 상태에서 run_vec 을 기울기와 함께
+    다시 계산한다 (정책 손실이 평가기 트렁크까지 흘러간다). params 는 기울기를 자를 파라미터 목록.
+    """
     steps = []
     n_traj = 0
     for g in groups:
@@ -136,33 +188,45 @@ def grpo_update(
             n_traj += 1
             w = 1.0 / len(t.actions)
             for o, a, tg, lp in zip(t.obs, t.actions, t.targets, t.logp):
-                steps.append((o, a, tg, lp, t.advantage, w, t.run_vec))
+                steps.append((o, a, tg, lp, t.advantage, w, t.run_vec, t.run_state))
     if not steps:
         return {"grpo_steps": 0}
     stats = {"loss": 0.0, "entropy": 0.0, "clip_frac": 0.0}
     n_batches = 0
+    dev = module_device(policy)
     for _ in range(epochs):
         perm = np.random.permutation(len(steps))
         for start in range(0, len(steps), minibatch):
             chunk = [steps[i] for i in perm[start : start + minibatch]]
-            batch = collate_combat([c[0] for c in chunk])
-            a = torch.tensor([c[1] for c in chunk])
-            tg = torch.tensor([c[2] for c in chunk])
-            old = torch.tensor([c[3] for c in chunk])
-            adv = torch.tensor([c[4] for c in chunk], dtype=torch.float)
-            w = torch.tensor([c[5] for c in chunk], dtype=torch.float)
+            batch = to_device(collate_combat([c[0] for c in chunk]), dev)
+            a = torch.tensor([c[1] for c in chunk], device=dev)
+            tg = torch.tensor([c[2] for c in chunk], device=dev)
+            old = torch.tensor([c[3] for c in chunk], device=dev)
+            adv = torch.tensor([c[4] for c in chunk], dtype=torch.float, device=dev)
+            w = torch.tensor([c[5] for c in chunk], dtype=torch.float, device=dev)
             rvs = [c[6] for c in chunk]
-            rv = torch.stack(rvs) if rvs[0] is not None else None
+            if run_vec_fn is not None and rvs[0] is not None and chunk[0][7] is not None:
+                # 같은 전투의 스텝들은 같은 시작 상태를 공유하므로 상태별로 한 번만 계산한다
+                uniq: dict[int, int] = {}
+                states = []
+                for c in chunk:
+                    if id(c[7]) not in uniq:
+                        uniq[id(c[7])] = len(states)
+                        states.append(c[7])
+                vecs = run_vec_fn(states)
+                rv = vecs[torch.tensor([uniq[id(c[7])] for c in chunk], device=vecs.device)]
+            else:
+                rv = torch.stack([torch.as_tensor(r) for r in rvs]).to(dev) if rvs[0] is not None else None
             lp, ent = policy.log_prob(batch, a, tg, rv)
             ratio = (lp - old).exp()
             obj = torch.min(ratio * adv, ratio.clamp(1 - clip, 1 + clip) * adv)
             loss = -(obj * w).sum() / n_traj - ent_coef * (ent * w).sum() / n_traj
             optim.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(list(params) if params is not None else policy.parameters(), 1.0)
             optim.step()
-            stats["loss"] += float(loss)
-            stats["entropy"] += float(ent.mean())
+            stats["loss"] += float(loss.detach())
+            stats["entropy"] += float(ent.mean().detach())
             stats["clip_frac"] += float(((ratio - 1).abs() > clip).float().mean())
             n_batches += 1
     out = {k: v / max(1, n_batches) for k, v in stats.items()}

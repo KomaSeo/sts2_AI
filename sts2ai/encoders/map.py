@@ -45,6 +45,8 @@ class MapEncoder(nn.Module):
     def forward(self, batch: dict, ctx: torch.Tensor) -> torch.Tensor:
         mask = batch["node_mask"]
         h = self.emb.node_type(batch["node_type"]) + self.feat(batch["node_feat"])
+        if "node_act" in batch:  # 노드가 몇 막에 속하나 (미래 막 가상 줄을 막마다 구분)
+            h = h + self.emb.act(batch["node_act"])
         gamma, beta = self.film(ctx).unsqueeze(1).chunk(2, dim=-1)
         h = (h * (1 + gamma) + beta) * mask.unsqueeze(-1)
         for _ in range(self.repeats):

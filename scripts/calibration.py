@@ -1,17 +1,20 @@
 """평가 에이전트 보정(calibration) 확인: 예측한 사망 확률 vs 실제 사망률.
 
 학습에 쓰지 않은 시드로 런을 돌려, 맵 스냅숏마다
-- 노드 평가기: 실제로 지나간 노드의 hazard 예측 vs 그 노드에서 실제로 죽었나
-- 미래 막 평가기: 실제로 도착한 미래 막의 p_act 예측 vs 그 막에서 실제로 죽었나
+- 이번 막 노드: 실제로 지나간 노드의 hazard 예측 vs 그 노드에서 실제로 죽었나
+- 미래 막 (층 단위): 미래 막 가상 줄의 층별 hazard 예측 vs 그 막의 그 층에서 실제로 죽었나
+  (평가기가 실제로 학습하는 단위). 층 구간(초반·중반·후반·보스)별로도 나눠 본다.
+- 미래 막 전체 (참고): 가상 줄 전체의 사망 확률 p_act vs 그 막에서 죽었나
 를 모아 구간별로 비교한다. 예측 0.3 구간의 실제 사망률이 0.3 근처면 잘 보정된 것이다.
 
 같은 사건(예: 어느 런의 1막 보스전)은 그 막의 스냅숏마다 한 번씩 예측되므로, 쌍을 그대로
 세면 표본이 부풀려진다. 그래서 두 가지 표를 낸다.
 - 모든 쌍: 여러 시점에서 내린 예측 전부 (먼 미래 예측 포함)
-- 사건 단위: 사건마다 가장 마지막 스냅숏(그 노드/막에 들어가기 직전)의 예측 하나만.
+- 사건 단위: 사건마다 가장 마지막 스냅숏(그 노드/층/막에 들어가기 직전)의 예측 하나만.
   실제 사망률 옆에 Wilson 95% 신뢰구간을 붙인다.
 
     python scripts/calibration.py --ckpt runs/toy/agent.pt --runs 50 --sample
+    python scripts/calibration.py --env sts2 --sts2-repo ../sts2 --d-model 128 --ckpt runs/sts2_v7/agent.pt --runs 50
 """
 
 from __future__ import annotations
@@ -27,7 +30,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sts2ai.agents.evaluator import IGNORE  # noqa: E402
-from sts2ai.batching import collate_run  # noqa: E402
+from sts2ai.batching import collate_run, future_chain_start  # noqa: E402
+from sts2ai.schema import NODE_BOSS_NA  # noqa: E402
 from sts2ai.train.evaluator_train import make_labels  # noqa: E402
 from sts2ai.train.loop import Agent, Config, play_run  # noqa: E402
 
@@ -91,12 +95,13 @@ def main() -> None:
 
         run = Sts2Run(args.sts2_repo)
     agent = Agent(run.vocab, args.d_model)
-    agent.load_state_dict(torch.load(args.ckpt))
+    agent.load_state_dict(torch.load(args.ckpt, map_location="cpu"))
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
-    # (런, 스냅숏 순번, 사건 키, 예측, 라벨, 노드 종류)
+    # (런, 스냅숏 순번, 사건 키, 예측, 라벨, 종류)
     node_rows: list[tuple] = []
+    chain_rows: list[tuple] = []  # 종류 = (몇 막 뒤인가, 층 구간)
     act_rows: list[tuple] = []
     for i in range(args.runs):
         snaps, _, _ = play_run(agent, run, Config(), rng, args.seed_base + i, use_evaluator=True,
@@ -107,10 +112,21 @@ def main() -> None:
             batch = collate_run([s.state for s in snaps], run.vocab)
             ev = agent.evaluator(batch)
             nl, al = make_labels(snaps, batch["node_type"].shape[1], run.vocab.n_acts)
+        chain = batch["chain_mask"]
         for b, s in enumerate(snaps):
             for v in (nl[b] != IGNORE).nonzero().flatten().tolist():
-                key = (i, s.state.act, v)
-                node_rows.append((i, b, key, float(ev.hazard[b, v]), float(nl[b, v]), s.state.map.node_types[v]))
+                pred, y = float(ev.hazard[b, v]), float(nl[b, v])
+                if not chain[b, v]:
+                    node_rows.append((i, b, (i, s.state.act, v), pred, y, s.state.map.node_types[v]))
+                    continue
+                k = int(batch["node_act"][b, v])
+                start, R = future_chain_start(s.state.map, s.state.act, k, run.vocab.n_acts)
+                row = v - start
+                if int(batch["node_type"][b, v]) == NODE_BOSS_NA:
+                    band = "보스"
+                else:
+                    band = ("초반", "중반", "후반")[min(2, row * 3 // max(1, R - 1))]
+                chain_rows.append((i, b, (i, k, row), pred, y, (k - s.state.act, band)))
             for k in (al[b] != IGNORE).nonzero().flatten().tolist():
                 act_rows.append((i, b, (i, k), float(ev.p_act[b, k]), float(al[b, k]), None))
 
@@ -121,8 +137,10 @@ def main() -> None:
                 latest[r[2]] = r
         return list(latest.values())
 
-    for name, rows in (("노드 평가기", node_rows), ("미래 막 평가기", act_rows)):
+    for name, rows in (("이번 막 노드", node_rows), ("미래 막 (층 단위)", chain_rows),
+                       ("미래 막 전체 (참고)", act_rows)):
         if not rows:
+            print(f"\n[{name}] 표본 없음")
             continue
         ev_rows = last_per_event(rows)
         pred_all = np.array([r[3] for r in rows])
@@ -131,13 +149,22 @@ def main() -> None:
         y_ev = np.array([r[4] for r in ev_rows])
         table(f"{name} — 모든 쌍", pred_all, y_all, ci=False)
         table(f"{name} — 사건 단위 (들어가기 직전 예측)", pred_ev, y_ev, ci=True)
-        if name == "노드 평가기":
+        if name == "이번 막 노드":
             print("  노드 종류별 (사건 단위):")
             for t in sorted({r[5] for r in ev_rows}):
                 sub = [r for r in ev_rows if r[5] == t]
                 k, n = sum(r[4] for r in sub), len(sub)
                 a, b = wilson(k, n)
                 print(f"    {NODE_NAMES.get(t, t):>4}: 사건 {n:4d}  평균 예측 {np.mean([r[3] for r in sub]):.3f}"
+                      f"  실제 {k / n:.3f} [{a:.2f}, {b:.2f}]")
+        if name == "미래 막 (층 단위)":
+            print("  몇 막 뒤 · 층 구간별 (모든 쌍: 먼 시점에서 한 예측도 포함):")
+            order = {"초반": 0, "중반": 1, "후반": 2, "보스": 3}
+            for t in sorted({r[5] for r in rows}, key=lambda x: (x[0], order[x[1]])):
+                sub = [r for r in rows if r[5] == t]
+                k, n = sum(r[4] for r in sub), len(sub)
+                a, b = wilson(k, n)
+                print(f"    {t[0]}막 뒤 {t[1]}: 쌍 {n:5d}  평균 예측 {np.mean([r[3] for r in sub]):.3f}"
                       f"  실제 {k / n:.3f} [{a:.2f}, {b:.2f}]")
 
 
