@@ -33,9 +33,12 @@ EPS = 1e-6
 
 def collect(agent: Agent, run, seeds: list[int], rng) -> list[list[Snapshot]]:
     out = []
-    for s in seeds:
+    t = time.time()
+    for i, s in enumerate(seeds):
         snaps, _, _ = play_run(agent, run, Config(), rng, s, use_evaluator=True, collect_grpo=False, greedy=False)
         out.append(snaps)
+        if (i + 1) % 100 == 0:
+            print(f"  수집 {i + 1}/{len(seeds)}판 ({time.time() - t:.0f}초)", flush=True)
     return out
 
 
