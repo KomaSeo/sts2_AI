@@ -45,6 +45,7 @@ class Config:
     val_every: int = 10  # 런 N 판마다 1 판은 평가기 검증용으로만 쓴다
     val_size: int = 400
     warmup_snapshots: int = 200  # 이만큼 모이기 전에는 GRPO 점수로 HP 비율 사용
+    policy_sees_map: bool = True  # 전투 정책에 RUN 토큰(덱·유물·상태·보스·맵 요약)을 넣을지. 끄면 전투 토큰만 본다
     seed: int = 0
     out_dir: str = "runs/latest"
 
@@ -57,6 +58,15 @@ class Agent:
         self.emb = SharedEmbeddings(vocab, d)
         self.evaluator = Evaluator(self.emb)
         self.policy = CombatPolicy(self.emb)
+
+    @torch.no_grad()
+    def run_vec(self, state) -> torch.Tensor:
+        """전투 정책에 줄 런 맥락 [d]. 평가기 트렁크에서 계산하고 기울기는 끊는다.
+
+        끊는 이유: 평가기는 생존 라벨로만 배우게 두고, 전투 정책 손실이 평가기 표현을 흔들지 않게.
+        정책은 자기 쪽 run_proj 로 이 벡터를 어떻게 쓸지 배운다.
+        """
+        return self.evaluator.run_vector(collate_run([state], self.vocab))[0]
 
     def state_dict(self):
         return {"evaluator": self.evaluator.state_dict(), "policy": self.policy.state_dict()}
@@ -83,6 +93,7 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
     rec = RunRecorder(agent.vocab.n_acts)
     groups: list[list[Trajectory]] = []
     last_combat, n_combats = None, 0
+    run_vec = None
     steps = 0
     while run.phase != PHASE_DONE and steps < 20000:
         steps += 1
@@ -91,12 +102,15 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
             if cid != last_combat:
                 last_combat = cid
                 n_combats += 1
+                # 전투가 시작될 때 한 번: 이 전투가 어느 노드에서 벌어지고 다음에 뭐가 오는지 (맵 포함)
+                run_vec = agent.run_vec(run.run_state()) if cfg.policy_sees_map else None
                 if collect_grpo and n_combats % cfg.grpo_every_n_combats == 0:
                     groups.append(rollout_group(
                         run, agent.policy, agent.evaluator if use_evaluator else None,
-                        cfg.group_size, rng, cfg.advantage_mode))
+                        cfg.group_size, rng, cfg.advantage_mode, run_vec=run_vec))
             o = run.combat_obs()
-            a, t, _ = agent.policy.act(collate_combat([o]), greedy=greedy)
+            rv = run_vec.unsqueeze(0) if run_vec is not None else None
+            a, t, _ = agent.policy.act(collate_combat([o]), greedy=greedy, run_vec=rv)
             run.combat_step(int(a), int(o.enemy_slots[int(t)]) if int(t) >= 0 else -1)
         elif run.phase == PHASE_MAP:
             rec.snapshot(run.run_state())

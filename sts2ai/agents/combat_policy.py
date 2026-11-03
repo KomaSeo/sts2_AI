@@ -34,8 +34,8 @@ class CombatPolicy(nn.Module):
         self.tq = nn.Linear(d, d)
         self.tk = nn.Linear(d, d)
 
-    def forward(self, batch: dict) -> PolicyOut:
-        h = self.encoder(batch)
+    def forward(self, batch: dict, run_vec: torch.Tensor | None = None) -> PolicyOut:
+        h = self.encoder(batch, run_vec)
         B, T, d = h.shape
         n = min(MAX_ACTIONS, T - 1)
         acts = h[:, 1 : 1 + n]
@@ -53,9 +53,9 @@ class CombatPolicy(nn.Module):
         logits = (self.tk(enemies) * q.unsqueeze(1)).sum(-1) / h.shape[-1] ** 0.5
         return logits.masked_fill(~batch["enemy_mask"], NEG)
 
-    def log_prob(self, batch: dict, action: torch.Tensor, target: torch.Tensor):
+    def log_prob(self, batch: dict, action: torch.Tensor, target: torch.Tensor, run_vec: torch.Tensor | None = None):
         """주어진 (행동, 타깃 인덱스) 의 log 확률과 엔트로피. target 은 enemy_tok 안의 인덱스."""
-        out = self(batch)
+        out = self(batch, run_vec)
         logp_a = torch.log_softmax(out.action_logits, -1)
         lp = logp_a.gather(1, action.unsqueeze(1)).squeeze(1)
         p_a = logp_a.exp()
@@ -68,9 +68,9 @@ class CombatPolicy(nn.Module):
         return lp, ent
 
     @torch.no_grad()
-    def act(self, batch: dict, greedy: bool = False):
+    def act(self, batch: dict, greedy: bool = False, run_vec: torch.Tensor | None = None):
         """배치 하나에서 (행동, 타깃 인덱스, log 확률) 을 뽑는다. 타깃 불필요 시 -1."""
-        out = self(batch)
+        out = self(batch, run_vec)
         dist = torch.distributions.Categorical(logits=out.action_logits)
         a = out.action_logits.argmax(-1) if greedy else dist.sample()
         lp = dist.log_prob(a)

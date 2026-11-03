@@ -150,7 +150,8 @@ TYPE_HAND_LOCKED = 13
 TYPE_RELIC = 14
 TYPE_INTENT = 15
 TYPE_INTENT_NEXT = 16
-N_TOKEN_TYPES = 17
+TYPE_RUN = 17  # 런 맥락(맵 포함) 토큰. CombatEncoder 가 맨 뒤에 붙인다. 시뮬레이터 관측에는 없다.
+N_TOKEN_TYPES = 18
 
 # 토큰 종류별로 ids 가 어느 임베딩 테이블을 가리키는지
 CARD_TOKEN_TYPES = (TYPE_HAND, TYPE_DRAW, TYPE_DISCARD, TYPE_EXHAUST, TYPE_SELECT, TYPE_HAND_LOCKED)

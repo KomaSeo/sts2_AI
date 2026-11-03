@@ -111,3 +111,29 @@ def test_log_value_separates_near_zero_states():
     b = log_survival_dp(torch.tensor([[-21.0, -20.0]]), adj, torch.ones(1, 2))
     assert a[0, 0].exp() < 1e-16 and b[0, 0].exp() < 1e-16  # 확률로는 둘 다 사실상 0
     assert float(a[0, 0] - b[0, 0]) == 1.0  # log 로는 정확히 1 nat 차이
+
+
+def test_policy_sees_next_node_through_run_token():
+    """같은 전투 상태라도 다음 노드(휴식 vs 엘리트)가 다르면 정책 입력이 달라져야 한다."""
+    from sts2ai import schema as S
+
+    run = _run_at_combat()
+    agent = Agent(run.vocab, 32)
+    agent.policy.eval()
+    state = run.run_state()
+    succ = state.map.successors()[state.map.current]
+    rest, elite = S.NODE_REST, S.NODE_ELITE
+    a, b = run.run_state(), run.run_state()
+    a.map.node_types = list(a.map.node_types)
+    b.map.node_types = list(b.map.node_types)
+    for v in succ:
+        a.map.node_types[v] = rest
+        b.map.node_types[v] = elite
+    batch = collate_combat([run.combat_obs()])
+    la = agent.policy(batch, agent.run_vec(a).unsqueeze(0)).action_logits
+    lb = agent.policy(batch, agent.run_vec(b).unsqueeze(0)).action_logits
+    legal = batch["legal"][0]
+    assert not torch.allclose(la[0, legal], lb[0, legal])
+    # RUN 토큰을 붙여도 행동 번호 규약(토큰 1+i = 행동 i)과 출력 모양은 그대로
+    assert la.shape == (1, S.MAX_ACTIONS)
+    assert torch.equal(la[0] > -1e8, legal)

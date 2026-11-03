@@ -118,8 +118,13 @@ class Evaluator(nn.Module):
         self.n_acts = emb.vocab.n_acts
 
     def logits(self, batch: dict):
-        ctx, nodes = self.encoder(batch)
-        return self.node_head(ctx, nodes), self.future_head(ctx, batch["act"])
+        ctx, nodes, run_vec = self.encoder(batch)
+        # 미래 막 위험은 남은 길(엘리트·휴식이 몇 개인가)에도 달려 있어서 맵 요약을 합친 run_vec 을 쓴다.
+        return self.node_head(ctx, nodes), self.future_head(run_vec, batch["act"])
+
+    def run_vector(self, batch: dict) -> torch.Tensor:
+        """전투 정책에 넘겨줄 런 맥락 (덱·유물·상태·보스·맵) [B, d]."""
+        return self.encoder(batch)[2]
 
     def forward(self, batch: dict) -> Evaluation:
         node_logit, act_logit = self.logits(batch)

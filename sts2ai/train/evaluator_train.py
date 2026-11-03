@@ -118,7 +118,7 @@ def train_evaluator(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(evaluator.parameters(), 1.0)
             optim.step()
-            stats["eval_loss"] += float(loss)
+            stats["eval_loss"] += float(loss.detach())
             stats["node_bce"] += info["node_bce"]
             stats["act_bce"] += info["act_bce"]
             n += 1

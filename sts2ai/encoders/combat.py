@@ -25,6 +25,7 @@ class CombatEncoder(nn.Module):
         self.token_type = nn.Embedding(S.N_TOKEN_TYPES, d)
         self.owner = nn.Embedding(MAX_OWNERS, d)
         self.feat = nn.Linear(S.N_COMBAT_FEATURES, d)
+        self.run_proj = nn.Linear(d, d)
         self.body = set_transformer(d, layers, heads)
         self.out = nn.LayerNorm(d)
 
@@ -48,7 +49,12 @@ class CombatEncoder(nn.Module):
             + table(e.encounter, (S.TYPE_GLOBAL,))
         )
 
-    def forward(self, batch: dict) -> torch.Tensor:
+    def forward(self, batch: dict, run_vec: torch.Tensor | None = None) -> torch.Tensor:
+        """run_vec [B,d] 이 있으면 RUN 토큰 하나를 맨 뒤에 붙인다.
+
+        위치 인코딩이 없어서 어디에 붙여도 같고, 맨 뒤라서 "토큰 1+i = 행동 i" 규약이 그대로다.
+        모든 토큰이 attention 으로 RUN 토큰(다음 노드가 휴식인지 등)을 읽는다.
+        """
         types = batch["types"]
         x = (
             self.token_type(types)
@@ -56,5 +62,11 @@ class CombatEncoder(nn.Module):
             + self.feat(batch["feats"])
             + self._id_embedding(types, batch["ids"])
         )
-        h = self.body(x, src_key_padding_mask=~batch["tok_mask"])
-        return self.out(h)  # [B, T, d]; 토큰 0 은 GLOBAL
+        mask = batch["tok_mask"]
+        T = x.shape[1]
+        if run_vec is not None:
+            run_tok = self.run_proj(run_vec) + self.token_type.weight[S.TYPE_RUN]
+            x = torch.cat([x, run_tok.unsqueeze(1)], dim=1)
+            mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
+        h = self.body(x, src_key_padding_mask=~mask)
+        return self.out(h)[:, :T]  # [B, T, d]; 토큰 0 은 GLOBAL. RUN 토큰은 출력에서 뺀다

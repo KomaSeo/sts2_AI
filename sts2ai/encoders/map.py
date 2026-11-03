@@ -51,3 +51,18 @@ class MapEncoder(nn.Module):
             for layer in self.layers:
                 h = layer(h, batch["adj"], mask)
         return h  # [B, V, d]
+
+    @staticmethod
+    def summary(h: torch.Tensor, batch: dict) -> torch.Tensor:
+        """맵 요약 [B, 2d] = [다음 선택지 노드 평균, 앞으로 갈 수 있는 노드 전체 평균].
+
+        "다음이 휴식인가 전투인가" 는 앞쪽에, "남은 길에 엘리트·휴식이 얼마나 있나" 는 뒤쪽에 담긴다.
+        고를 노드가 없으면 (보스를 이겼거나 맵이 없으면) 0 벡터.
+        """
+
+        def masked_mean(m: torch.Tensor) -> torch.Tensor:
+            w = m.float().unsqueeze(-1)
+            return (h * w).sum(1) / w.sum(1).clamp(min=1)
+
+        reachable = batch["node_feat"][..., 3] > 0
+        return torch.cat([masked_mean(batch["choice_mask"]), masked_mean(reachable)], dim=-1)

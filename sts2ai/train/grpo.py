@@ -34,13 +34,16 @@ class Trajectory:
     potions: list[int] = field(default_factory=list)
     score: float = 0.0
     advantage: float = 0.0
+    run_vec: torch.Tensor | None = None  # [d] 전투 시작 시점의 런 맥락 (맵 포함). 전투 내내 같다.
 
 
-def play(policy: CombatPolicy, sim: CombatSim, greedy: bool = False, max_steps: int = 300) -> Trajectory:
-    tr = Trajectory()
+def play(policy: CombatPolicy, sim: CombatSim, greedy: bool = False, max_steps: int = 300,
+         run_vec: torch.Tensor | None = None) -> Trajectory:
+    tr = Trajectory(run_vec=run_vec)
+    rv = run_vec.unsqueeze(0) if run_vec is not None else None
     while not sim.done and len(tr.actions) < max_steps:
         o = sim.observe()
-        a, t, lp = policy.act(collate_combat([o]), greedy=greedy)
+        a, t, lp = policy.act(collate_combat([o]), greedy=greedy, run_vec=rv)
         a, t = int(a), int(t)
         slot = int(o.enemy_slots[t]) if t >= 0 else -1
         tr.obs.append(o)
@@ -102,10 +105,11 @@ def rollout_group(
     group_size: int,
     rng: np.random.Generator,
     mode: str = "zscore",
+    run_vec: torch.Tensor | None = None,
 ) -> list[Trajectory]:
     """지금 런이 서 있는 전투를 group_size 번 분기해서 굴리고 점수와 이점을 매긴다."""
     base = run.run_state()
-    trajs = [play(policy, run.fork_combat(int(rng.integers(2**31)))) for _ in range(group_size)]
+    trajs = [play(policy, run.fork_combat(int(rng.integers(2**31))), run_vec=run_vec) for _ in range(group_size)]
     for t, sc in zip(trajs, score_outcomes(evaluator, base, trajs, run.vocab)):
         t.score = sc
     for t, a in zip(trajs, advantages([t.score for t in trajs], mode)):
@@ -132,7 +136,7 @@ def grpo_update(
             n_traj += 1
             w = 1.0 / len(t.actions)
             for o, a, tg, lp in zip(t.obs, t.actions, t.targets, t.logp):
-                steps.append((o, a, tg, lp, t.advantage, w))
+                steps.append((o, a, tg, lp, t.advantage, w, t.run_vec))
     if not steps:
         return {"grpo_steps": 0}
     stats = {"loss": 0.0, "entropy": 0.0, "clip_frac": 0.0}
@@ -147,7 +151,9 @@ def grpo_update(
             old = torch.tensor([c[3] for c in chunk])
             adv = torch.tensor([c[4] for c in chunk], dtype=torch.float)
             w = torch.tensor([c[5] for c in chunk], dtype=torch.float)
-            lp, ent = policy.log_prob(batch, a, tg)
+            rvs = [c[6] for c in chunk]
+            rv = torch.stack(rvs) if rvs[0] is not None else None
+            lp, ent = policy.log_prob(batch, a, tg, rv)
             ratio = (lp - old).exp()
             obj = torch.min(ratio * adv, ratio.clamp(1 - clip, 1 + clip) * adv)
             loss = -(obj * w).sum() / n_traj - ent_coef * (ent * w).sum() / n_traj
