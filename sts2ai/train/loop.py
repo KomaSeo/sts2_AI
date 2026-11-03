@@ -41,7 +41,9 @@ class Config:
     lr_eval: float = 1e-3
     eval_epochs: int = 3
     grpo_epochs: int = 2
-    buffer_size: int = 4000
+    buffer_size: int = 1500  # 최근 데이터만: 정책이 좋아지면 옛 사망 기록은 틀린 라벨이 된다
+    val_every: int = 10  # 런 N 판마다 1 판은 평가기 검증용으로만 쓴다
+    val_size: int = 400
     warmup_snapshots: int = 200  # 이만큼 모이기 전에는 GRPO 점수로 HP 비율 사용
     seed: int = 0
     out_dir: str = "runs/latest"
@@ -113,9 +115,11 @@ def train(run: RunSim, cfg: Config, log=print) -> Agent:
     torch.manual_seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
     agent = Agent(run.vocab, cfg.d_model)
-    opt_eval = torch.optim.Adam(agent.evaluator.parameters(), lr=cfg.lr_eval)
+    opt_eval = torch.optim.AdamW(agent.evaluator.parameters(), lr=cfg.lr_eval, weight_decay=0.01)
     opt_pol = torch.optim.Adam(agent.policy.parameters(), lr=cfg.lr_policy)
     buffer: list[Snapshot] = []
+    val_buffer: list[Snapshot] = []
+    n_runs = 0
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -126,11 +130,14 @@ def train(run: RunSim, cfg: Config, log=print) -> Agent:
         results, groups = [], []
         for r in range(cfg.runs_per_iter):
             snaps, g, res = play_run(agent, run, cfg, rng, seed=int(rng.integers(2**31)), use_evaluator=use_eval)
-            buffer.extend(snaps)
+            n_runs += 1
+            (val_buffer if n_runs % cfg.val_every == 0 else buffer).extend(snaps)
             groups.extend(g)
             results.append(res)
         buffer = buffer[-cfg.buffer_size:]
-        ev_stats = train_evaluator(agent.evaluator, opt_eval, buffer, agent.vocab, epochs=cfg.eval_epochs)
+        val_buffer = val_buffer[-cfg.val_size:]
+        ev_stats = train_evaluator(agent.evaluator, opt_eval, buffer, agent.vocab, epochs=cfg.eval_epochs,
+                                   val=val_buffer or None)
         pg_stats = grpo_update(agent.policy, opt_pol, groups, epochs=cfg.grpo_epochs)
         group_win = float(np.mean([t.won for g in groups for t in g])) if groups else 0.0
         row = {

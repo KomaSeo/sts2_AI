@@ -71,6 +71,25 @@ def make_labels(snaps: list[Snapshot], n_nodes: int, n_acts: int):
     return node, act
 
 
+@torch.no_grad()
+def eval_bce(evaluator: Evaluator, snaps: list[Snapshot], vocab: Vocab, batch_size: int = 128) -> float:
+    """검증 세트 손실 (노드 + 막 BCE)."""
+    if not snaps:
+        return float("nan")
+    was = evaluator.training
+    evaluator.eval()
+    total, n = 0.0, 0
+    for start in range(0, len(snaps), batch_size):
+        chunk = snaps[start : start + batch_size]
+        batch = collate_run([s.state for s in chunk], vocab)
+        node_l, act_l = make_labels(chunk, batch["node_type"].shape[1], vocab.n_acts)
+        loss, _ = evaluator.loss(batch, node_l, act_l)
+        total += float(loss) * len(chunk)
+        n += len(chunk)
+    evaluator.train(was)
+    return total / n
+
+
 def train_evaluator(
     evaluator: Evaluator,
     optim: torch.optim.Optimizer,
@@ -78,11 +97,16 @@ def train_evaluator(
     vocab: Vocab,
     epochs: int = 3,
     batch_size: int = 64,
+    val: list[Snapshot] | None = None,
 ) -> dict:
+    """val 이 있으면 에폭마다 검증 손실을 보고, 나빠지면 직전 가중치로 되돌리고 멈춘다."""
     if not buffer:
         return {}
     stats = {"eval_loss": 0.0, "node_bce": 0.0, "act_bce": 0.0}
     n = 0
+    best = eval_bce(evaluator, val, vocab) if val else None
+    best_state = {k: v.clone() for k, v in evaluator.state_dict().items()} if val else None
+    epochs_run = 0
     for _ in range(epochs):
         order = list(range(len(buffer)))
         random.shuffle(order)
@@ -99,4 +123,15 @@ def train_evaluator(
             stats["node_bce"] += info["node_bce"]
             stats["act_bce"] += info["act_bce"]
             n += 1
-    return {k: v / max(1, n) for k, v in stats.items()}
+        epochs_run += 1
+        if val:
+            v = eval_bce(evaluator, val, vocab)
+            if v > best:
+                evaluator.load_state_dict(best_state)  # 과적합 시작 → 되돌리고 중단
+                break
+            best, best_state = v, {k: t.clone() for k, t in evaluator.state_dict().items()}
+    out = {k: v / max(1, n) for k, v in stats.items()}
+    if val:
+        out["val_bce"] = best
+        out["eval_epochs_run"] = epochs_run
+    return out
