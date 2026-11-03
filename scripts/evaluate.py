@@ -26,9 +26,13 @@ def main() -> None:
     p.add_argument("--random", action="store_true", help="학습 안 한 에이전트")
     p.add_argument("--runs", type=int, default=50)
     p.add_argument("--sample", action="store_true", help="greedy 대신 정책 확률대로 샘플링")
+    p.add_argument("--chooser", choices=["rules", "ev"], default="rules", help="전투·맵 밖 선택: 규칙 / 기대값 선택기")
+    p.add_argument("--chooser-samples", type=int, default=8)
     p.add_argument("--d-model", type=int, default=64)
     p.add_argument("--seed-base", type=int, default=10_000)
+    p.add_argument("--threads", type=int, default=1, help="PyTorch 스레드 수")
     args = p.parse_args()
+    torch.set_num_threads(args.threads)
     if args.env == "toy":
         from sts2ai.envs.toy import ToyRun
 
@@ -41,7 +45,7 @@ def main() -> None:
     agent = Agent(run.vocab, args.d_model)
     if not args.random:
         agent.load_state_dict(torch.load(args.ckpt))
-    cfg = Config()
+    cfg = Config(chooser=args.chooser, chooser_samples=args.chooser_samples)
     rng = np.random.default_rng(0)
     res = []
     for i in range(args.runs):

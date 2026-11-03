@@ -79,7 +79,9 @@ def main() -> None:
     p.add_argument("--seed-base", type=int, default=50_000)
     p.add_argument("--seed", type=int, default=0, help="정책 샘플링·맵 탐색 난수 (같은 값이면 같은 결과)")
     p.add_argument("--sample", action="store_true", help="학습 때처럼 정책을 샘플링 (기본은 greedy)")
+    p.add_argument("--threads", type=int, default=1, help="PyTorch 스레드 수")
     args = p.parse_args()
+    torch.set_num_threads(args.threads)
     if args.env == "toy":
         from sts2ai.envs.toy import ToyRun
 

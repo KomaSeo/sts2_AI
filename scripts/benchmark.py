@@ -57,7 +57,10 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--json")
     p.add_argument("--runs", type=int, default=20)
+    p.add_argument("--threads", type=int, default=1, help="PyTorch 스레드 수 (0 이면 PyTorch 기본값)")
     args = p.parse_args()
+    if args.threads > 0:
+        torch.set_num_threads(args.threads)
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
     run = ToyRun()

@@ -137,3 +137,58 @@ def test_policy_sees_next_node_through_run_token():
     # RUN 토큰을 붙여도 행동 번호 규약(토큰 1+i = 행동 i)과 출력 모양은 그대로
     assert la.shape == (1, S.MAX_ACTIONS)
     assert torch.equal(la[0] > -1e8, legal)
+
+
+class _FakeEvaluation:
+    def __init__(self, logv, hazard):
+        self.log_run_value = logv
+        self.hazard = hazard
+
+
+class _StrikeHater:
+    """가짜 평가기: 덱의 타격(id 1) 한 장마다 log V −0.5, Heavy Blade(id 6) 가 있으면 +2."""
+
+    def __call__(self, batch):
+        ids = batch["deck_ids"] * batch["deck_mask"]
+        logv = -0.5 * (ids == 1).sum(-1).double() + 2.0 * (ids == 6).any(-1).double()
+        return _FakeEvaluation(logv, torch.zeros(batch["node_type"].shape))
+
+
+def _run_at_screen(make):
+    run = ToyRun()
+    run.reset(0)
+    run._open(make(run))
+    return run
+
+
+def test_chooser_removes_the_card_the_evaluator_dislikes():
+    from sts2ai.agents.chooser import ExpectedValueChooser
+
+    run = _run_at_screen(lambda r: {"kind": "deck", "op": "remove", "eligible": list(range(len(r.deck)))})
+    ch = ExpectedValueChooser(_StrikeHater(), run.vocab, samples=4)
+    a = ch.choose(run, np.random.default_rng(0))
+    assert run.deck[a].id == 1  # 타격을 뺀다
+
+
+def test_chooser_follows_shop_removal_into_the_next_screen():
+    """'카드 제거' 구입의 가치는 다음 화면에서 가장 좋은 카드를 뺐을 때의 가치여야 한다."""
+    from sts2ai.agents.chooser import ExpectedValueChooser
+
+    run = _run_at_screen(lambda r: {"kind": "shop", "cards": [2, 7], "bought": [False, False], "removed": False})
+    ch = ExpectedValueChooser(_StrikeHater(), run.vocab, samples=2)
+    vals = ch.evaluate(run, np.random.default_rng(0))
+    remove, leave = 2, 3
+    assert abs((vals[remove] - vals[leave]) - 0.5) < 1e-6  # 타격 한 장 제거 = +0.5
+    assert ch.choose(run, np.random.default_rng(0)) == remove
+
+
+def test_chooser_values_random_transform_by_expectation():
+    """무작위 변환: 결과를 몰라도 '가끔 Heavy Blade 가 나온다' 를 기대값으로 반영한다."""
+    from sts2ai.agents.chooser import ExpectedValueChooser
+
+    run = _run_at_screen(lambda r: {"kind": "event_transform"})
+    ch = ExpectedValueChooser(_StrikeHater(), run.vocab, samples=32, follow_samples=32)
+    vals = ch.evaluate(run, np.random.default_rng(0))
+    transform, leave = 0, 1
+    # 타격 하나를 변환하면 최소 +0.5, 8장 중 1장 꼴로 Heavy Blade 가 나와 +2 가 더해진다
+    assert vals[transform] > vals[leave] + 0.5

@@ -268,8 +268,33 @@ class Sts2Run:
             raise RuntimeError(f"node {node} is not a map choice here: {slots}")
         self._step(slots[node])
 
-    # ---- 그 밖의 화면: 간단한 규칙 ----
+    # ---- 복사 (숨은 난수 재샘플) ----
+    def clone(self, seed: int) -> Sts2Run:
+        """run_clone(resample_hidden=True): 변환·무작위 강화 결과, 앞으로의 보상 등을 다시 뽑은 복사본."""
+        c = Sts2Run.__new__(Sts2Run)
+        c.__dict__.update(self.__dict__)
+        c.env = self.env.clone(resample_hidden=True, seed=seed)
+        c._obs, c._info = c.env._obs(), c.env._info()  # noqa: SLF001
+        c._map = MapGraph(**{**self._map.__dict__})
+        c._sync()
+        return c
+
+    # ---- 그 밖의 선택 화면 ----
+    def screen_kind(self) -> str:
+        names = {v: k for k, v in vars(self.lib.rc).items() if k.startswith("PHASE_") and isinstance(v, int)}
+        return names.get(self._info["phase"], str(self._info["phase"]))
+
+    def choice_actions(self) -> list[int]:
+        return [int(a) for a in np.flatnonzero(self.env.action_masks())]
+
+    def step_choice(self, action: int) -> None:
+        self._step(action)
+
     def default_step(self, rng: np.random.Generator) -> None:
+        self._step(self.rule_action(rng))
+
+    def rule_action(self, rng: np.random.Generator) -> int:
+        """비교 기준이 되는 규칙 정책."""
         rc = self.lib.rc
         mask = self.env.action_masks()
         legal = np.flatnonzero(mask)
@@ -295,7 +320,7 @@ class Sts2Run:
             choice = rc.TREASURE_TAKE_RELIC_ACTION
         if choice is None:
             choice = int(rng.choice(legal))
-        self._step(choice)
+        return int(choice)
 
     def close(self) -> None:
         if self.env is not None:

@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from ..agents import CombatPolicy, Evaluator
+from ..agents.chooser import ExpectedValueChooser
 from ..batching import collate_combat, collate_run
 from ..encoders import SharedEmbeddings
 from ..envs.base import PHASE_COMBAT, PHASE_DONE, PHASE_MAP, RunSim
@@ -45,7 +46,12 @@ class Config:
     val_every: int = 10  # 런 N 판마다 1 판은 평가기 검증용으로만 쓴다
     val_size: int = 400
     warmup_snapshots: int = 200  # 이만큼 모이기 전에는 GRPO 점수로 HP 비율 사용
-    policy_sees_map: bool = True  # 전투 정책에 RUN 토큰(덱·유물·상태·보스·맵 요약)을 넣을지. 끄면 전투 토큰만 본다
+    chooser: str = "rules"  # 전투·맵 밖 선택: "rules" 규칙 정책, "ev" 기대값 선택기 (평가기 사용)
+    chooser_samples: int = 8  # 기대값 선택기가 선택지마다 굴리는 복사본 수
+    policy_sees_map: bool = True
+    # PyTorch 스레드 수. 배치가 작은 계산(롤아웃 한 스텝, 선택기)이 대부분이라 1 이 보통 더 빠르다.
+    # 다른 작업과 CPU 를 나눠 쓸 때 4 스레드는 한 번 계산이 50배 넘게 느려진 적이 있다.
+    torch_threads: int = 1  # 전투 정책에 RUN 토큰(덱·유물·상태·보스·맵 요약)을 넣을지. 끄면 전투 토큰만 본다
     seed: int = 0
     out_dir: str = "runs/latest"
 
@@ -118,7 +124,11 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
             rec.visit(run.act, node)
             run.choose_node(node)
         else:
-            run.default_step(rng)
+            if cfg.chooser == "ev" and use_evaluator:
+                chooser = ExpectedValueChooser(agent.evaluator, agent.vocab, samples=cfg.chooser_samples)
+                run.step_choice(chooser.choose(run, rng))
+            else:
+                run.default_step(rng)
     death_act = run.act if run.died else agent.vocab.n_acts - 1
     snaps = rec.finish(run.died, death_act, run.current_node)
     result = {"won": run.won, "died": run.died, "act": run.act, "floor": run.floor, "combats": n_combats}
@@ -127,6 +137,7 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
 
 def train(run: RunSim, cfg: Config, log=print) -> Agent:
     torch.manual_seed(cfg.seed)
+    torch.set_num_threads(cfg.torch_threads)
     rng = np.random.default_rng(cfg.seed)
     agent = Agent(run.vocab, cfg.d_model)
     opt_eval = torch.optim.AdamW(agent.evaluator.parameters(), lr=cfg.lr_eval, weight_decay=0.01)

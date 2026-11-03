@@ -3,6 +3,16 @@
 실제 게임을 흉내 낸 것이 아니라 '같은 모양의 문제'를 만든 것이다:
 3막, 막마다 DAG 맵(일반/엘리트/휴식/이벤트/상점/보스), 에너지·손패·방어도·힘·취약,
 적 의도, 유물·포션, 카드 보상. 관측은 CombatObs/RunState 규약을 그대로 따른다.
+
+전투·맵 밖의 선택 화면 (PHASE_OTHER):
+- card_reward : 카드 3장 중 하나 또는 건너뛰기
+- rest        : 회복 / 강화(→ 덱 선택 화면)
+- shop        : 카드 구입 / 카드 제거(→ 덱 선택 화면) / 나가기
+- event_transform : 카드 하나를 무작위 카드로 변환(→ 덱 선택 화면) / 나가기
+- event_relic : 유물 2개 중 하나 / 나가기. War Paint·Whetstone 은 줍는 순간 무작위 2장 강화
+- deck        : 덱에서 카드 고르기 (제거 / 강화 / 무작위 변환). 행동 번호 = 덱 인덱스
+무작위 결과(변환될 카드, 강화될 카드)는 선택하는 순간 런 난수로 정해진다. clone(seed) 는
+그 난수를 다시 뽑은 복사본을 만든다 — 실제 시뮬레이터의 run_clone(resample_hidden=True) 와 같은 역할.
 """
 
 from __future__ import annotations
@@ -54,6 +64,9 @@ I_ATTACK, I_BLOCK, I_BUFF, I_ATTACK_BLOCK = 1, 2, 3, 4
 B_STRENGTH, B_VULN = 1, 2
 # 유물
 R_BURNING, R_VAJRA, R_ANCHOR, R_LANTERN = 1, 2, 3, 4
+# 줍는 순간 무작위로 카드를 강화하는 유물 (StS2 의 War Paint, Whetstone 과 같은 방식)
+R_WARPAINT, R_WHETSTONE = 5, 6
+RELIC_POOL = [R_VAJRA, R_ANCHOR, R_LANTERN, R_WARPAINT, R_WHETSTONE]
 # 포션
 P_FIRE, P_BLOCK, P_STRENGTH = 1, 2, 3
 
@@ -90,7 +103,7 @@ MAX_HAND = 10
 
 VOCAB = Vocab(
     n_cards=max(CARDS) + 1,
-    n_relics=5,
+    n_relics=7,
     n_potions=4,
     n_buffs=3,
     n_enemies=max(ENEMIES) + 1,
@@ -427,6 +440,14 @@ def generate_map(rng: random.Random) -> MapGraph:
     return MapGraph(types, rows, cols, sorted(edges), None, n_rows=ROWS)
 
 
+SHOP_REMOVE_PRICE = 75
+SHOP_CARD_PRICE = 50
+
+
+def is_attack(card_id: int) -> bool:
+    return CARDS[card_id].dmg > 0
+
+
 class ToyRun:
     """RunSim 프로토콜 구현."""
 
@@ -442,19 +463,29 @@ class ToyRun:
         self.max_hp = 70
         self.hp = 70
         self.gold = 99
-        self.deck = [Card(i, False, 0, CARDS[i].cost / 5) for i in STARTER]
+        self.deck = [self._card(i) for i in STARTER]
         self.relics = [R_BURNING]
         self.potions = [0, 0, 0]
         self.won = self.died = False
         self._combat_counter = 0
         self._new_act()
 
+    @staticmethod
+    def _card(cid: int, upgraded: bool = False) -> Card:
+        return Card(cid, upgraded, 0, CARDS[cid].cost / 5)
+
     def _new_act(self) -> None:
         self.map = generate_map(self.rng)
         self.current_node = None
         self.combat: Combat | None = None
-        self.pending: tuple | None = None
+        self.screen: dict | None = None
         self.phase = PHASE_MAP
+
+    def clone(self, seed: int) -> ToyRun:
+        """숨은 난수를 다시 뽑은 복사본. 이미 공개된 것(덱, 화면의 선택지)은 그대로다."""
+        c = copy.deepcopy(self)
+        c.rng = random.Random(seed)
+        return c
 
     # ---- 상태 ----
     def run_state(self) -> RunState:
@@ -480,21 +511,28 @@ class ToyRun:
             self._start_combat(BOSS_ENC)
         elif t == S.NODE_EVENT:
             roll = self.rng.random()
-            if roll < 0.25:
+            if roll < 0.2:
                 self._start_combat(self.rng.choice(NORMAL_ENC))
-            elif roll < 0.6:
+            elif roll < 0.45:
                 self.hp = min(self.max_hp, self.hp + 12)
                 self._after_room()
+            elif roll < 0.65:
+                self._open({"kind": "event_transform"})
+            elif roll < 0.85:
+                offer = [r for r in RELIC_POOL if r not in self.relics]
+                self.rng.shuffle(offer)
+                if offer:
+                    self._open({"kind": "event_relic", "relics": offer[:2]})
+                else:
+                    self._after_room()
             else:
                 self.hp = max(1, self.hp - 7)
-                self.pending = ("card", [self.rng.choice(REWARD_POOL) for _ in range(3)])
-                self.phase = PHASE_OTHER
+                self._open({"kind": "card_reward", "cards": [self.rng.choice(REWARD_POOL) for _ in range(3)]})
         elif t == S.NODE_REST:
-            self.pending = ("rest",)
-            self.phase = PHASE_OTHER
+            self._open({"kind": "rest"})
         elif t == S.NODE_SHOP:
-            self.pending = ("shop",)
-            self.phase = PHASE_OTHER
+            cards = self.rng.sample(REWARD_POOL, 2)
+            self._open({"kind": "shop", "cards": cards, "bought": [False, False], "removed": False})
         else:
             self._after_room()
 
@@ -548,40 +586,158 @@ class ToyRun:
             return
         self.gold += self.rng.randint(15, 25) if enc in NORMAL_ENC else 35
         if enc in ELITE_ENC:
-            r = self.rng.choice([R_VAJRA, R_ANCHOR, R_LANTERN])
-            if r not in self.relics:
-                self.relics.append(r)
+            offer = [r for r in RELIC_POOL if r not in self.relics]
+            if offer:
+                self._gain_relic(self.rng.choice(offer))
         if self.rng.random() < 0.4 and 0 in self.potions:
             self.potions[self.potions.index(0)] = self.rng.choice([P_FIRE, P_BLOCK, P_STRENGTH])
-        self.pending = ("card", self.rng.sample(REWARD_POOL, 3))
+        self._open({"kind": "card_reward", "cards": self.rng.sample(REWARD_POOL, 3)})
+
+    def _gain_relic(self, r: int) -> None:
+        self.relics.append(r)
+        if r in (R_WARPAINT, R_WHETSTONE):  # 줍는 순간 무작위 2장 강화 — 결과는 런 난수로 정해진다
+            want_attack = r == R_WHETSTONE
+            cands = [i for i, c in enumerate(self.deck) if not c.upgraded and is_attack(c.id) == want_attack]
+            for i in self.rng.sample(cands, min(2, len(cands))):
+                self.deck[i] = self._card(self.deck[i].id, True)
+
+    # ---- 선택 화면 ----
+    def _open(self, screen: dict) -> None:
+        self.screen = screen
         self.phase = PHASE_OTHER
 
-    # ---- 그 밖의 화면: 간단한 규칙 ----
-    def default_step(self, rng: np.random.Generator) -> None:
-        kind = self.pending[0]
-        if kind == "card":
-            if rng.random() < 0.7:
-                cid = int(rng.choice(self.pending[1]))
-                self.deck.append(Card(cid, False, 0, CARDS[cid].cost / 5))
-        elif kind == "rest":
-            if self.hp < 0.6 * self.max_hp:
+    def _deck_screen(self, op: str) -> None:
+        if op == "upgrade":
+            eligible = [i for i, c in enumerate(self.deck) if not c.upgraded]
+        else:
+            eligible = list(range(len(self.deck)))
+        if eligible:
+            self._open({"kind": "deck", "op": op, "eligible": eligible})
+        else:
+            self._after_room()
+
+    def screen_kind(self) -> str:
+        return self.screen["kind"] if self.screen else ""
+
+    def choice_actions(self) -> list[int]:
+        """지금 화면에서 가능한 행동 번호."""
+        sc = self.screen
+        k = sc["kind"]
+        if k == "card_reward":
+            return list(range(len(sc["cards"]) + 1))  # 마지막 = 건너뛰기
+        if k == "rest":
+            return [0, 1] if any(not c.upgraded for c in self.deck) else [0]
+        if k == "shop":
+            acts = [i for i, cid in enumerate(sc["cards"]) if not sc["bought"][i] and self.gold >= SHOP_CARD_PRICE]
+            if not sc["removed"] and self.gold >= SHOP_REMOVE_PRICE:
+                acts.append(len(sc["cards"]))  # 카드 제거 서비스
+            return acts + [len(sc["cards"]) + 1]  # 나가기
+        if k == "event_transform":
+            return [0, 1]
+        if k == "event_relic":
+            return list(range(len(sc["relics"]) + 1))  # 마지막 = 나가기
+        if k == "deck":
+            return list(sc["eligible"])
+        raise ValueError(k)
+
+    def describe(self, a: int) -> str:
+        sc = self.screen
+        k = sc["kind"]
+        if k == "card_reward":
+            return CARDS[sc["cards"][a]].name if a < len(sc["cards"]) else "건너뛰기"
+        if k == "rest":
+            return ["회복", "강화"][a]
+        if k == "shop":
+            n = len(sc["cards"])
+            return f"{CARDS[sc['cards'][a]].name} 구입" if a < n else ("카드 제거" if a == n else "나가기")
+        if k == "event_transform":
+            return ["무작위 변환", "나가기"][a]
+        if k == "event_relic":
+            names = {R_VAJRA: "Vajra", R_ANCHOR: "Anchor", R_LANTERN: "Lantern", R_WARPAINT: "War Paint",
+                     R_WHETSTONE: "Whetstone"}
+            return names[sc["relics"][a]] if a < len(sc["relics"]) else "나가기"
+        c = self.deck[a]
+        return f"{sc['op']}: {CARDS[c.id].name}{'+' if c.upgraded else ''}"
+
+    def step_choice(self, a: int) -> None:
+        assert self.phase == PHASE_OTHER and a in self.choice_actions(), (self.screen, a)
+        sc = self.screen
+        k = sc["kind"]
+        if k == "card_reward":
+            if a < len(sc["cards"]):
+                self.deck.append(self._card(sc["cards"][a]))
+            self._after_room()
+        elif k == "rest":
+            if a == 0:
                 self.hp = min(self.max_hp, self.hp + int(0.3 * self.max_hp))
+                self._after_room()
             else:
-                cands = [c for c in self.deck if not c.upgraded]
-                if cands:
-                    c = cands[int(rng.integers(len(cands)))]
-                    i = self.deck.index(c)
-                    self.deck[i] = Card(c.id, True, c.enchant, c.cost)
-        elif kind == "shop":
-            if self.gold >= 75:
-                basics = [i for i, c in enumerate(self.deck) if c.id in (1, 2)]
-                if basics:
-                    self.deck.pop(basics[0])
-                    self.gold -= 75
-        self.pending = None
-        self._after_room()
+                self._deck_screen("upgrade")
+        elif k == "shop":
+            n = len(sc["cards"])
+            if a < n:
+                self.gold -= SHOP_CARD_PRICE
+                sc["bought"][a] = True
+                self.deck.append(self._card(sc["cards"][a]))
+            elif a == n:
+                self.gold -= SHOP_REMOVE_PRICE
+                sc["removed"] = True
+                self._return_to = sc
+                self._deck_screen("remove")
+            else:
+                self._after_room()
+        elif k == "event_transform":
+            if a == 0:
+                self._deck_screen("transform")
+            else:
+                self._after_room()
+        elif k == "event_relic":
+            if a < len(sc["relics"]):
+                self._gain_relic(sc["relics"][a])
+            self._after_room()
+        elif k == "deck":
+            op = sc["op"]
+            if op == "remove":
+                self.deck.pop(a)
+            elif op == "upgrade":
+                self.deck[a] = self._card(self.deck[a].id, True)
+            elif op == "transform":  # 무엇으로 바뀔지는 이 순간 런 난수로 정해진다
+                self.deck[a] = self._card(self.rng.choice(REWARD_POOL))
+            back = getattr(self, "_return_to", None)
+            self._return_to = None
+            if back is not None:  # 상점에서 제거한 뒤에는 상점으로 돌아간다
+                self._open(back)
+            else:
+                self._after_room()
+
+    # ---- 규칙 정책 (기대값 선택기와 비교할 기준) ----
+    def rule_action(self, rng: np.random.Generator) -> int:
+        sc = self.screen
+        k = sc["kind"]
+        acts = self.choice_actions()
+        if k == "card_reward":
+            return int(rng.choice(acts[:-1])) if rng.random() < 0.7 else acts[-1]
+        if k == "rest":
+            return 0 if self.hp < 0.6 * self.max_hp or len(acts) == 1 else 1
+        if k == "shop":
+            n = len(sc["cards"])
+            return n if n in acts else n + 1  # 돈 되면 제거, 아니면 나가기
+        if k == "event_transform":
+            return int(rng.integers(2))
+        if k == "event_relic":
+            return int(rng.choice(acts))
+        if k == "deck":
+            if sc["op"] == "remove":  # 처음 나오는 타격/수비
+                basics = [i for i in acts if self.deck[i].id in (1, 2)]
+                return basics[0] if basics else acts[0]
+            return int(rng.choice(acts))
+        raise ValueError(k)
+
+    def default_step(self, rng: np.random.Generator) -> None:
+        self.step_choice(self.rule_action(rng))
 
     def _after_room(self) -> None:
+        self.screen = None
         self.phase = PHASE_MAP
 
     def close(self) -> None:

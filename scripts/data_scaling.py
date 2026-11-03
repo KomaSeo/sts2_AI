@@ -124,7 +124,9 @@ def main() -> None:
     p.add_argument("--max-epochs", type=int, default=30)
     p.add_argument("--patience", type=int, default=3)
     p.add_argument("--out", default="runs/data_scaling.json")
+    p.add_argument("--threads", type=int, default=1, help="PyTorch 스레드 수")
     args = p.parse_args()
+    torch.set_num_threads(args.threads)
 
     run = ToyRun()
     collector = Agent(run.vocab, args.d_model)
