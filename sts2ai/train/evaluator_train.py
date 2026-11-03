@@ -99,13 +99,12 @@ def train_evaluator(
     batch_size: int = 64,
     val: list[Snapshot] | None = None,
 ) -> dict:
-    """val 이 있으면 에폭마다 검증 손실을 보고, 나빠지면 직전 가중치로 되돌리고 멈춘다."""
+    """val 이 있으면 에폭마다 검증 손실을 보고, 둘째 에폭부터 나빠지면 직전 가중치로 되돌리고 멈춘다."""
     if not buffer:
         return {}
     stats = {"eval_loss": 0.0, "node_bce": 0.0, "act_bce": 0.0}
     n = 0
-    best = eval_bce(evaluator, val, vocab) if val else None
-    best_state = {k: v.clone() for k, v in evaluator.state_dict().items()} if val else None
+    best, best_state = None, None
     epochs_run = 0
     for _ in range(epochs):
         order = list(range(len(buffer)))
@@ -126,8 +125,10 @@ def train_evaluator(
         epochs_run += 1
         if val:
             v = eval_bce(evaluator, val, vocab)
-            if v > best:
-                evaluator.load_state_dict(best_state)  # 과적합 시작 → 되돌리고 중단
+            # 첫 에폭은 항상 반영한다. 정책이 계속 바뀌어서 '지난 반복보다 검증 손실이 나빠짐'은
+            # 과적합이 아니라 데이터가 바뀐 것일 수 있고, 되돌리면 평가기가 얼어붙는다.
+            if epochs_run > 1 and v > best:
+                evaluator.load_state_dict(best_state)  # 추가 에폭부터 과적합 → 되돌리고 중단
                 break
             best, best_state = v, {k: t.clone() for k, t in evaluator.state_dict().items()}
     out = {k: v / max(1, n) for k, v in stats.items()}
