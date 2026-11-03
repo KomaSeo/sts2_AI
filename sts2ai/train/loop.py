@@ -64,6 +64,9 @@ class Agent:
         self.emb = SharedEmbeddings(vocab, d)
         self.evaluator = Evaluator(self.emb)
         self.policy = CombatPolicy(self.emb)
+        # 기대값 선택기가 쓸 평가기. None 이면 self.evaluator. 전투 정책은 self.evaluator 의 run_vec 으로
+        # 학습됐으므로, 선택기 쪽만 다른 평가기로 바꿔 실험할 때 쓴다.
+        self.chooser_evaluator: Evaluator | None = None
 
     @torch.no_grad()
     def run_vec(self, state) -> torch.Tensor:
@@ -125,7 +128,8 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
             run.choose_node(node)
         else:
             if cfg.chooser == "ev" and use_evaluator:
-                chooser = ExpectedValueChooser(agent.evaluator, agent.vocab, samples=cfg.chooser_samples)
+                chooser = ExpectedValueChooser(agent.chooser_evaluator or agent.evaluator, agent.vocab,
+                                               samples=cfg.chooser_samples)
                 run.step_choice(chooser.choose(run, rng))
             else:
                 run.default_step(rng)
