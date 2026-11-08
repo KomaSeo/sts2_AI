@@ -300,3 +300,87 @@ def test_drive_batches_runs_and_forks_together():
     assert max(sizes) == 2 * 4
     # 분기마다 전투 길이가 달라 끝으로 갈수록 배치가 줄고, 진짜 전투는 런마다 한 개씩이라 평균은 8 보다 작다
     assert sum(sizes) / len(sizes) > 2
+
+
+# ---- 전투만 따로 학습 ----
+
+def test_combat_score_order():
+    """이기면 무조건 진 것보다 높고, HP 를 덜 잃을수록·포션을 덜 쓸수록·최대 HP 가 오를수록 높다."""
+    from sts2ai.train.combat_train import CombatConfig, combat_score
+
+    cfg = CombatConfig()
+    worst_win = combat_score(True, 125, 1, 125, 125, 9, 1.0, cfg)
+    best_loss = combat_score(False, 125, 0, 125, 125, 0, 1.0, cfg)
+    assert worst_win > best_loss
+    base = combat_score(True, 50, 40, 60, 60, 1, 1.0, cfg)
+    assert combat_score(True, 50, 45, 60, 60, 1, 1.0, cfg) > base  # HP 덜 잃음
+    assert combat_score(True, 50, 40, 60, 60, 0, 1.0, cfg) > base  # 포션 덜 씀
+    assert combat_score(True, 50, 40, 60, 63, 1, 1.0, cfg) > base  # 최대 HP 상승
+    assert combat_score(False, 50, 0, 60, 60, 0, 0.8, cfg) > combat_score(False, 50, 0, 60, 60, 0, 0.2, cfg)
+    cfg.loss_ranking = False
+    assert combat_score(False, 50, 0, 60, 60, 0, 0.8, cfg) == combat_score(False, 50, 0, 60, 60, 0, 0.2, cfg)
+
+
+def test_combat_scenarios_cover_pool_within_ranges():
+    from sts2ai.train.combat_train import CombatConfig, scenarios_for_round
+
+    env, cfg = ToyRun(), CombatConfig()
+    rng = np.random.default_rng(0)
+    scs = [sc for _ in range(20) for sc in scenarios_for_round(env, rng, cfg)]
+    assert {(sc.encounter, sc.act) for sc in scs[:18]} == set(env.combat_pool())
+    for sc in scs:
+        assert 10 <= len(sc.deck) <= 50 and 0 <= len(sc.potions) <= 9
+        assert 1 <= sc.hp <= sc.max_hp <= 125
+    assert min(len(sc.deck) for sc in scs) <= 12 and max(len(sc.deck) for sc in scs) >= 48
+    assert {cid for sc in scs for cid, _ in sc.deck} == set(env.card_pool())
+
+
+def test_combat_group_shares_seed():
+    """GRPO 그룹의 시행들은 같은 전투(같은 셔플·적 HP)에서 출발한다."""
+    from sts2ai.train.combat_train import CombatConfig, scenarios_for_round
+
+    env = ToyRun()
+    sc = scenarios_for_round(env, np.random.default_rng(1), CombatConfig())[0]
+    a, b = (env.make_combat(sc.encounter, sc.act, sc.deck, sc.hp, sc.max_hp, sc.potions, sc.relics, sc.seed)
+            for _ in range(2))
+    oa, ob = a.observe(), b.observe()
+    assert np.array_equal(oa.ids, ob.ids) and np.allclose(oa.feats, ob.feats)
+    assert [e.hp for e in a.c.enemies] == [e.hp for e in b.c.enemies]
+    assert [c.id for c in a.c.draw] == [c.id for c in b.c.draw]
+    assert np.isclose(oa.feats[0, S.F_HP_ABS], sc.hp / 50)
+
+
+def test_combat_training_resumes_exactly(tmp_path):
+    import random
+
+    from sts2ai.train.combat_train import CombatConfig, train_combat
+
+    def run(out, iters, resume=False):
+        cfg = CombatConfig(iterations=iters, group_size=2, deck_max=15, d_model=16, grpo_epochs=1,
+                           eval_every=0, out_dir=str(out))
+        return train_combat(ToyRun(), cfg, log=lambda *_: None, resume=resume)
+
+    random.seed(0), np.random.seed(0)
+    full = run(tmp_path / "full", 2)
+    random.seed(0), np.random.seed(0)
+    run(tmp_path / "split", 1)
+    torch.manual_seed(5)
+    resumed = run(tmp_path / "split", 2, resume=True)
+    for k, v in full.state_dict().items():
+        assert torch.equal(v, resumed.state_dict()[k]), k
+
+
+def test_run_training_starts_from_combat_policy(tmp_path):
+    from sts2ai.train.combat_train import CombatPolicy
+    from sts2ai.encoders import SharedEmbeddings
+    from sts2ai.train.loop import train
+
+    pol = CombatPolicy(SharedEmbeddings(ToyRun.vocab, 16))
+    torch.save(pol.state_dict(), tmp_path / "combat_policy.pt")
+    cfg = _tiny_cfg(tmp_path / "run", 0)
+    cfg.init_policy = str(tmp_path / "combat_policy.pt")
+    agent = train(ToyRun(), cfg, log=lambda *_: None)
+    for k, v in pol.state_dict().items():
+        assert torch.equal(v, agent.policy.state_dict()[k]), k
+    # 공유 임베딩이라 평가기 쪽 임베딩도 같이 바뀐다
+    assert agent.emb is agent.policy.encoder.emb and torch.equal(agent.emb.card.weight, pol.encoder.emb.card.weight)

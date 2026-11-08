@@ -61,6 +61,8 @@ class Config:
     device: str = "cpu"
     # 나란히 진행할 런 수. 0 이면 runs_per_iter 전부. 한 스텝 배치 크기 ≈ parallel_runs × (group_size + 1)
     parallel_runs: int = 0
+    # 처음 시작할 때 불러올 전투 정책 가중치 (scripts/train_combat.py 의 combat_policy.pt). 이어서 학습할 때는 무시
+    init_policy: str = ""
 
 
 def resolve_device(name: str) -> torch.device:
@@ -232,6 +234,10 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
         log(f"resume: {ckpt_path} 에서 반복 {start} 부터 이어서 학습합니다 (목표 {cfg.iterations})")
     elif resume:
         log(f"resume: {ckpt_path} 가 없어서 처음부터 학습합니다")
+    if start == 0 and cfg.init_policy:
+        # 정책과 평가기가 공유 임베딩을 같이 쓰므로, 불러온 임베딩이 평가기의 출발점도 된다
+        agent.policy.load_state_dict(torch.load(cfg.init_policy, map_location="cpu"))
+        log(f"init_policy: {cfg.init_policy} 의 전투 정책으로 시작합니다")
     (out / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
     log(f"device={device} parallel_runs={cfg.parallel_runs or cfg.runs_per_iter}")
     n_par = max(1, min(cfg.parallel_runs or cfg.runs_per_iter, cfg.runs_per_iter))

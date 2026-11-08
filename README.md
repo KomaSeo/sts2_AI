@@ -46,6 +46,7 @@ Slay the Spire 2를 플레이하는 AI의 구조 실험입니다.
 | `sts2ai/train/grpo.py` | GRPO: 분기 롤아웃, 채점, 그룹 상대 이점, clipped 업데이트 |
 | `sts2ai/train/evaluator_train.py` | 생존 분석식 라벨 만들기와 평가기 학습 |
 | `sts2ai/train/loop.py` | 전체 학습 루프 |
+| `sts2ai/train/combat_train.py` | 전투만 따로 학습 (무작위 덱·HP·포션, 같은 시드 GRPO) |
 | `sts2ai/envs/toy.py` | 검증용 토이 게임 |
 | `sts2ai/envs/sts2_adapter.py` | r33hab/sts2 어댑터 (**실행 검증 전**) |
 
@@ -80,6 +81,29 @@ Slay the Spire 2를 플레이하는 AI의 구조 실험입니다.
 - 평가기가 스냅숏 200개를 모으기 전(워밍업)에는 남은 HP 비율로 채점합니다.
 
 critic(가치망) 없이 그룹 평균이 기준선 역할을 하는 것이 GRPO의 핵심입니다. 같은 상태에서 여러 번 굴려 서로 비교하는 방식은 RLOO(REINFORCE Leave-One-Out)와도 가깝습니다.
+
+### 전투만 따로 학습 (`scripts/train_combat.py`)
+
+런 안에서만 배우면 전투 에이전트는 카드 선택이 고른 카드만 많이 보게 됩니다. 그러면 "강한 카드"가 아니라 "전투 에이전트가 이미 잘 쓰는 카드"가 계속 뽑히는 쪽으로 굳습니다. 그래서 런 없이 무작위 상황을 만들어 모든 카드, 모든 적과 싸우게 합니다(`sts2ai/train/combat_train.py`).
+
+- **시나리오:** 무작위 덱(`--deck-min 10`~`--deck-max 50`장, 카드 풀 전체에서 고르고 `--upgrade-prob 0.2`로 강화), 무작위 포션(0~9개), 무작위 HP(1~125)로 만듭니다. 최대 HP는 [HP, 125]에서 뽑고, 유물은 없습니다.
+- **상대:** 반복마다 (조우, 막) 전체(토이에서는 6 × 3 = 18개)를 한 바퀴씩 돌아서 모든 적과 고르게 싸웁니다.
+- **GRPO 그룹:** 같은 시나리오, **같은 시드**로 G번 싸웁니다. 셔플과 적 난수가 같으므로 시행끼리의 차이는 정책의 선택에서만 나옵니다.
+- **점수:** 이긴 시행은 항상 진 시행보다 높습니다.
+  - 이김: `2 + clip(q/125, -1, 1)`, `q = ΔHP − 10·쓴 포션 수 + 1·Δ최대HP` → 범위 [1, 3]
+  - 짐: `−1 + 적에게 준 피해 비율` → 범위 [−1, 0]. 그룹 전체가 져도 학습 신호가 남습니다. `--no-loss-ranking`이면 −1로 고정합니다.
+  - 가중치는 `--potion-cost-hp`(포션 1개 = HP 몇)와 `--max-hp-weight`로 바꿉니다.
+- **런 맥락:** 전투만 보므로 RUN 토큰은 넣지 않습니다. 전투 관측의 전역 토큰에 HP 비율 말고 절대 HP(`F_HP_ABS`)와 최대 HP(`F_MAX_HP`)를 추가했습니다. 그래야 HP 1과 HP 125를 구분합니다.
+- **검증:** `--eval-every`마다 고정된 검증 시나리오(`--eval-rounds` 바퀴)를 greedy로 평가하고, 조우·막별 승률을 출력합니다.
+
+```bash
+.venv/bin/python scripts/train_combat.py --iterations 200 --out-dir runs/combat
+```
+```bash
+.venv/bin/python scripts/train.py --env toy --init-policy runs/combat/combat_policy.pt   # 런 학습에 이어 붙이기
+```
+
+실제 시뮬레이터는 임의의 덱, HP, 포션으로 전투를 시작하는 API(`make_combat`)를 아직 확인하지 못해서 토이에서만 됩니다.
 
 ## 실행
 

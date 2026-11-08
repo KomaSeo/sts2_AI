@@ -176,6 +176,8 @@ F_ENEMY_HP_FRAC = 10
 F_ENEMY_BLOCK = 11
 F_INTENT_MAG = 12
 F_MAGNITUDE = 13
+F_HP_ABS = 14  # 전역 토큰: 지금 HP / 50 (F_HP 는 비율이라 HP 크기를 모른다)
+F_MAX_HP = 15  # 전역 토큰: 최대 HP / 100
 
 
 @dataclass

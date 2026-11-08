@@ -324,7 +324,8 @@ class Combat:
             owners.append(owner)
             feats.append(row)
 
-        push(S.TYPE_GLOBAL, self.encounter, F_HP=self.hp / self.max_hp, F_BLOCK=self.block / 50,
+        push(S.TYPE_GLOBAL, self.encounter, F_HP=self.hp / self.max_hp, F_HP_ABS=self.hp / 50,
+             F_MAX_HP=self.max_hp / 100, F_BLOCK=self.block / 50,
              F_ENERGY=self.energy / 10, F_DRAW_N=len(self.draw) / 20, F_DISCARD_N=len(self.discard) / 20,
              F_EXHAUST_N=len(self.exhaust) / 20)
         for c in self.hand:  # 행동 블록: 정렬하지 않는다
@@ -395,6 +396,15 @@ class ToyCombatSim:
 
     def potions(self) -> list[int]:
         return list(self.c.potions)
+
+    def max_hp(self) -> int:
+        return self.c.max_hp
+
+    def enemy_damage_frac(self) -> float:
+        """적 전체 최대 HP 중 깎은 비율 (0~1)."""
+        total = sum(e.max_hp for e in self.c.enemies)
+        left = sum(max(0, e.hp) for e in self.c.enemies)
+        return 1.0 - left / max(1, total)
 
     def close(self) -> None:
         pass
@@ -480,6 +490,24 @@ class ToyRun:
         self.combat: Combat | None = None
         self.screen: dict | None = None
         self.phase = PHASE_MAP
+
+    # ---- 전투만 따로 학습할 때 (train/combat_train.py) ----
+    def combat_pool(self) -> list[tuple[int, int]]:
+        """(조우, 막) 전부. 막이 오르면 적 HP·공격력이 커진다."""
+        return [(enc, act) for act in range(N_ACTS) for enc in sorted(ENCOUNTERS)]
+
+    def card_pool(self) -> list[int]:
+        return sorted(CARDS)
+
+    def potion_pool(self) -> list[int]:
+        return [P_FIRE, P_BLOCK, P_STRENGTH]
+
+    def make_combat(self, encounter: int, act: int, deck: list[tuple[int, bool]], hp: int, max_hp: int,
+                    potions: list[int], relics: list[int], seed: int) -> ToyCombatSim:
+        """임의의 덱·HP·포션으로 시작하는 전투. 같은 인자와 seed 면 같은 전투(셔플·적 HP·적 난수)."""
+        cards = [self._card(cid, up) for cid, up in deck]
+        return ToyCombatSim(Combat(act=act, encounter=encounter, hp=hp, max_hp=max_hp, deck=cards,
+                                   relics=list(relics), potions=list(potions), seed=seed))
 
     def spawn(self) -> ToyRun:
         return ToyRun(ascension=self.ascension)

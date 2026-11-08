@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from sts2ai.train.cli import add_config_args, config_from_args  # noqa: E402
 from sts2ai.train.loop import Config, train  # noqa: E402
 
 
@@ -23,10 +24,9 @@ def main() -> None:
     p.add_argument("--ascension", type=int, default=0)
     p.add_argument("--resume", action="store_true",
                    help="--out-dir 에 체크포인트가 있으면 이어서 학습 (없으면 처음부터)")
-    for name, field in Config.__dataclass_fields__.items():
-        p.add_argument(f"--{name.replace('_', '-')}", type=type(field.default), default=field.default)
+    add_config_args(p, Config)
     args = p.parse_args()
-    cfg = Config(**{k: getattr(args, k) for k in Config.__dataclass_fields__})
+    cfg = config_from_args(args, Config)
     if args.env == "toy":
         from sts2ai.envs.toy import ToyRun
 

@@ -43,6 +43,7 @@ class Trajectory:
     score: float = 0.0
     advantage: float = 0.0
     run_vec: torch.Tensor | None = None  # [d] 전투 시작 시점의 런 맥락 (맵 포함). 전투 내내 같다.
+    info: dict = field(default_factory=dict)  # 기록용 (전투 학습의 쓴 포션 수 등)
 
 
 @dataclass

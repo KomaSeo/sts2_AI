@@ -2,6 +2,7 @@
 # 클라우드 인스턴스에서 학습을 돌리고, 끝나면 인스턴스를 끈다.
 #
 #   scripts/cloud_train.sh --out-dir runs/a --shutdown -- --env toy --iterations 200
+#   scripts/cloud_train.sh --script scripts/train_combat.py --out-dir runs/combat --shutdown -- --iterations 400
 #
 # - 항상 --resume 으로 실행한다. 스팟 회수 등으로 꺼졌다 다시 켜지면 마지막 반복 다음부터 이어 간다.
 # - 학습이 끝나면 <out-dir>/DONE 을 만든다. 실패하면 <out-dir>/FAILED 를 만든다.
@@ -15,7 +16,7 @@
 set -uo pipefail
 
 usage() {
-    echo "사용법: $0 --out-dir DIR [--shutdown] [--python PY] -- [train.py 인자...]" >&2
+    echo "사용법: $0 --out-dir DIR [--shutdown] [--python PY] [--script scripts/train.py] -- [학습 인자...]" >&2
     exit 2
 }
 
@@ -23,11 +24,13 @@ OUT_DIR=""
 SHUTDOWN=0
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON=""
+SCRIPT="scripts/train.py"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
         --shutdown) SHUTDOWN=1; shift ;;
         --python) PYTHON="${2:-}"; shift 2 ;;
+        --script) SCRIPT="${2:-}"; shift 2 ;;
         --) shift; break ;;
         *) usage ;;
     esac
@@ -60,11 +63,11 @@ for marker in DONE FAILED; do
     fi
 done
 
-echo "[cloud_train] $(date -Is) 시작: $PYTHON scripts/train.py --resume --out-dir $OUT_DIR $*" | tee -a "$LOG"
+echo "[cloud_train] $(date -Is) 시작: $PYTHON $SCRIPT --resume --out-dir $OUT_DIR $*" | tee -a "$LOG"
 # 이 스크립트가 SIGTERM 을 받으면(시스템 종료) 학습 프로세스에도 넘기고, 실패 표시는 하지 않는다.
 INTERRUPTED=0
 trap 'INTERRUPTED=1; kill -TERM "$CHILD" 2>/dev/null' TERM INT
-"$PYTHON" -u "$REPO/scripts/train.py" --resume --out-dir "$OUT_DIR" "$@" >>"$LOG" 2>&1 &
+"$PYTHON" -u "$REPO/$SCRIPT" --resume --out-dir "$OUT_DIR" "$@" >>"$LOG" 2>&1 &
 CHILD=$!
 wait "$CHILD"
 STATUS=$?
