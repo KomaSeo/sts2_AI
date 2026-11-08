@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-from ..batching import collate_run
+from ..batching import collate_run, module_device, to_device
 from ..envs.base import PHASE_COMBAT, PHASE_DONE, PHASE_OTHER
 from .evaluator import Evaluator
 
@@ -93,7 +93,7 @@ class ExpectedValueChooser:
                 idx.append(i)
         if idx:
             states = [sims[i].run_state() for i in idx]
-            batch = collate_run(states, self.vocab)
+            batch = to_device(collate_run(states, self.vocab), module_device(self.evaluator))
             ev = self.evaluator(batch)
             logv = ev.log_run_value.double()
             for j, i in enumerate(idx):

@@ -244,3 +244,59 @@ def test_resume_rejects_changed_config(tmp_path):
     cfg.lr_policy = 1e-2
     with pytest.raises(ValueError, match="lr_policy"):
         train(ToyRun(), cfg, log=lambda *_: None, resume=True)
+
+
+def test_batched_rollout_matches_one_by_one():
+    """여러 전투를 한 배치로 같이 굴려도(greedy) 하나씩 굴린 것과 행동·log 확률이 같다. 패딩 영향 없음."""
+    from sts2ai.train.grpo import drive, play_steps
+
+    agent = Agent(ToyRun.vocab, 32)
+    runs = [_run_at_combat(seed) for seed in range(3)]
+    rvs = [agent.run_vec(r.run_state()) for r in runs]
+    alone = [play(agent.policy, r.fork_combat(k), greedy=True, run_vec=rv)
+             for r, rv in zip(runs, rvs) for k in range(3)]
+    together = [t for ts in drive(agent.policy, [
+        play_steps([r.fork_combat(k) for k in range(3)], greedy=True, run_vec=rv) for r, rv in zip(runs, rvs)
+    ]) for t in ts]
+    for a, b in zip(alone, together):
+        assert a.actions == b.actions and a.targets == b.targets and a.won == b.won and a.hp == b.hp
+        assert np.allclose(a.logp, b.logp, atol=1e-4)
+
+
+def test_parallel_runs_match_sequential_runs():
+    """런 여러 판을 나란히 진행해도 판마다 따로 돌린 결과와 같다 (greedy, 런마다 난수 생성기)."""
+    from sts2ai.train.grpo import drive
+    from sts2ai.train.loop import Config, play_run, play_run_steps
+
+    agent = Agent(ToyRun.vocab, 32)
+    cfg = Config()
+    seeds = [3, 4, 5]
+    alone = [play_run(agent, ToyRun(), cfg, np.random.default_rng(s), s, use_evaluator=True,
+                      collect_grpo=False, greedy=True)[2] for s in seeds]
+    together = [o[2] for o in drive(agent.policy, [
+        play_run_steps(agent, ToyRun(), cfg, np.random.default_rng(s), s, use_evaluator=True,
+                       collect_grpo=False, greedy=True) for s in seeds])]
+    assert alone == together
+
+
+def test_drive_batches_runs_and_forks_together():
+    """런 2판 × 분기 4: 한 번의 정책 호출에 요청이 8개까지 모이고, 평균으로도 하나씩보다 훨씬 크다."""
+    from sts2ai.train.grpo import drive
+    from sts2ai.train.loop import Config, play_run_steps
+
+    agent = Agent(ToyRun.vocab, 32)
+    sizes = []
+    real_act = agent.policy.act
+
+    def counting_act(batch, greedy=False, run_vec=None):
+        sizes.append(batch["types"].shape[0])
+        return real_act(batch, greedy=greedy, run_vec=run_vec)
+
+    agent.policy.act = counting_act
+    cfg = Config(group_size=4)
+    outs = drive(agent.policy, [play_run_steps(agent, ToyRun(), cfg, np.random.default_rng(s), s,
+                                               use_evaluator=False) for s in (0, 1)])
+    assert all(len(g) == 4 for _, groups, _ in outs for g in groups)
+    assert max(sizes) == 2 * 4
+    # 분기마다 전투 길이가 달라 끝으로 갈수록 배치가 줄고, 진짜 전투는 런마다 한 개씩이라 평균은 8 보다 작다
+    assert sum(sizes) / len(sizes) > 2

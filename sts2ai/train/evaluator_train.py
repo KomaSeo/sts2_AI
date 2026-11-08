@@ -15,7 +15,7 @@ import torch
 
 from ..agents import Evaluator
 from ..agents.evaluator import IGNORE
-from ..batching import collate_run
+from ..batching import collate_run, module_device, to_device
 from ..schema import RunState, Vocab
 
 
@@ -78,11 +78,13 @@ def eval_bce(evaluator: Evaluator, snaps: list[Snapshot], vocab: Vocab, batch_si
         return float("nan")
     was = evaluator.training
     evaluator.eval()
+    dev = module_device(evaluator)
     total, n = 0.0, 0
     for start in range(0, len(snaps), batch_size):
         chunk = snaps[start : start + batch_size]
         batch = collate_run([s.state for s in chunk], vocab)
         node_l, act_l = make_labels(chunk, batch["node_type"].shape[1], vocab.n_acts)
+        batch, node_l, act_l = to_device(batch, dev), node_l.to(dev), act_l.to(dev)
         loss, _ = evaluator.loss(batch, node_l, act_l)
         total += float(loss) * len(chunk)
         n += len(chunk)
@@ -106,6 +108,7 @@ def train_evaluator(
     n = 0
     best, best_state = None, None
     epochs_run = 0
+    dev = module_device(evaluator)
     for _ in range(epochs):
         order = list(range(len(buffer)))
         random.shuffle(order)
@@ -113,6 +116,7 @@ def train_evaluator(
             snaps = [buffer[i] for i in order[start : start + batch_size]]
             batch = collate_run([s.state for s in snaps], vocab)
             node_l, act_l = make_labels(snaps, batch["node_type"].shape[1], vocab.n_acts)
+            batch, node_l, act_l = to_device(batch, dev), node_l.to(dev), act_l.to(dev)
             loss, info = evaluator.loss(batch, node_l, act_l)
             optim.zero_grad()
             loss.backward()

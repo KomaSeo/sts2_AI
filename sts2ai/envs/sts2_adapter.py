@@ -268,6 +268,12 @@ class Sts2Run:
             raise RuntimeError(f"node {node} is not a map choice here: {slots}")
         self._step(slots[node])
 
+    def spawn(self) -> Sts2Run:
+        """네이티브 라이브러리(_Lib)는 같이 쓰고 런 환경만 따로 둔다."""
+        c = Sts2Run.__new__(Sts2Run)
+        c.lib, c.vocab, c.ascension, c.env = self.lib, self.vocab, self.ascension, None
+        return c
+
     # ---- 복사 (숨은 난수 재샘플) ----
     def clone(self, seed: int) -> Sts2Run:
         """run_clone(resample_hidden=True): 변환·무작위 강화 결과, 앞으로의 보상 등을 다시 뽑은 복사본."""

@@ -8,6 +8,17 @@ import torch
 from .schema import CombatObs, MapGraph, RunState, Vocab, MAX_ACTIONS, N_COMBAT_FEATURES
 
 
+def to_device(batch: dict[str, torch.Tensor], device: torch.device | str) -> dict[str, torch.Tensor]:
+    return {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+
+
+def module_device(module) -> torch.device:
+    """모듈 가중치가 있는 장치. 가중치가 없는 것(테스트용 가짜 평가기 등)은 CPU."""
+    params = getattr(module, "parameters", None)
+    p = next(params(), None) if params is not None else None
+    return p.device if p is not None else torch.device("cpu")
+
+
 def _pad(rows: list[list], width: int, fill=0, dtype=torch.long) -> torch.Tensor:
     out = torch.full((len(rows), max(1, width)), fill, dtype=dtype)
     for i, row in enumerate(rows):

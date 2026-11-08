@@ -61,6 +61,9 @@ class RunSim(Protocol):
     def default_step(self, rng: np.random.Generator) -> None:
         """규칙 정책으로 한 번 고른다."""
         ...
+    def spawn(self) -> RunSim:
+        """같은 설정(승천 등)의 독립된 새 런. reset 전 상태. 여러 런을 나란히 굴릴 때 쓴다."""
+        ...
     def clone(self, seed: int) -> RunSim:
         """숨은 난수(무작위 변환·강화 결과, 앞으로의 보상 등)를 다시 뽑은 복사본."""
         ...

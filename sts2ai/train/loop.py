@@ -1,7 +1,8 @@
 """전체 학습 루프.
 
 반복마다:
-  1) 런을 여러 판 플레이한다.
+  1) 런을 여러 판 플레이한다. parallel_runs 판씩 나란히 진행하고, 그 런들의 GRPO 분기 전투와 진짜 전투가
+     요청하는 행동을 매 스텝 한 배치로 묶어 정책에 넣는다 (grpo.drive).
      - 전투가 시작되면: 그 전투를 G 번 분기해 굴리고(GRPO 그룹), 그다음 진짜 전투를 정책으로 플레이.
      - 맵에서는: 평가 에이전트가 계산한 '이 노드로 가면 막을 살아서 끝낼 확률'이 가장 높은 노드
        (ε 확률로 무작위 — 다양한 길의 데이터를 모으려고).
@@ -24,11 +25,11 @@ import torch
 
 from ..agents import CombatPolicy, Evaluator
 from ..agents.chooser import ExpectedValueChooser
-from ..batching import collate_combat, collate_run
+from ..batching import collate_run, module_device, to_device
 from ..encoders import SharedEmbeddings
 from ..envs.base import PHASE_COMBAT, PHASE_DONE, PHASE_MAP, RunSim
 from .evaluator_train import RunRecorder, Snapshot, train_evaluator
-from .grpo import Trajectory, grpo_update, rollout_group
+from .grpo import ActRequest, Steps, Trajectory, drive, grpo_update, rollout_group_steps
 
 
 @dataclass
@@ -56,6 +57,16 @@ class Config:
     torch_threads: int = 1  # 전투 정책에 RUN 토큰(덱·유물·상태·보스·맵 요약)을 넣을지. 끄면 전투 토큰만 본다
     seed: int = 0
     out_dir: str = "runs/latest"
+    # 계산 장치: "cpu", "cuda", "auto"(GPU 가 있으면 cuda)
+    device: str = "cpu"
+    # 나란히 진행할 런 수. 0 이면 runs_per_iter 전부. 한 스텝 배치 크기 ≈ parallel_runs × (group_size + 1)
+    parallel_runs: int = 0
+
+
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(name)
 
 
 class Agent:
@@ -70,6 +81,15 @@ class Agent:
         # 학습됐으므로, 선택기 쪽만 다른 평가기로 바꿔 실험할 때 쓴다.
         self.chooser_evaluator: Evaluator | None = None
 
+    def to(self, device) -> Agent:
+        self.evaluator.to(device)
+        self.policy.to(device)
+        return self
+
+    @property
+    def device(self) -> torch.device:
+        return module_device(self.policy)
+
     @torch.no_grad()
     def run_vec(self, state) -> torch.Tensor:
         """전투 정책에 줄 런 맥락 [d]. 평가기 트렁크에서 계산하고 기울기는 끊는다.
@@ -77,7 +97,7 @@ class Agent:
         끊는 이유: 평가기는 생존 라벨로만 배우게 두고, 전투 정책 손실이 평가기 표현을 흔들지 않게.
         정책은 자기 쪽 run_proj 로 이 벡터를 어떻게 쓸지 배운다.
         """
-        return self.evaluator.run_vector(collate_run([state], self.vocab))[0]
+        return self.evaluator.run_vector(to_device(collate_run([state], self.vocab), self.device))[0]
 
     def state_dict(self):
         return {"evaluator": self.evaluator.state_dict(), "policy": self.policy.state_dict()}
@@ -93,13 +113,20 @@ def choose_node(agent: Agent, run: RunSim, rng: np.random.Generator, epsilon: fl
     choices = state.map.next_choices()
     if rng.random() < epsilon:
         return int(rng.choice(choices))
-    batch = collate_run([state], agent.vocab)
+    batch = to_device(collate_run([state], agent.vocab), module_device(agent.evaluator))
     ev = agent.evaluator(batch)
     return max(choices, key=lambda c: float(ev.log_survive[0, c]))
 
 
 def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, seed: int,
              use_evaluator: bool, collect_grpo: bool = True, greedy: bool = False):
+    """런 한 판. return (스냅숏, GRPO 그룹, 결과)."""
+    return drive(agent.policy, [play_run_steps(agent, run, cfg, rng, seed, use_evaluator, collect_grpo, greedy)])[0]
+
+
+def play_run_steps(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, seed: int,
+                   use_evaluator: bool, collect_grpo: bool = True, greedy: bool = False) -> Steps:
+    """play_run 의 코루틴 버전. 전투 행동은 yield 로 요청한다 (grpo.drive 참고)."""
     run.reset(seed)
     rec = RunRecorder(agent.vocab.n_acts)
     groups: list[list[Trajectory]] = []
@@ -116,13 +143,12 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
                 # 전투가 시작될 때 한 번: 이 전투가 어느 노드에서 벌어지고 다음에 뭐가 오는지 (맵 포함)
                 run_vec = agent.run_vec(run.run_state()) if cfg.policy_sees_map else None
                 if collect_grpo and n_combats % cfg.grpo_every_n_combats == 0:
-                    groups.append(rollout_group(
-                        run, agent.policy, agent.evaluator if use_evaluator else None,
-                        cfg.group_size, rng, cfg.advantage_mode, run_vec=run_vec))
+                    groups.append((yield from rollout_group_steps(
+                        run, agent.evaluator if use_evaluator else None,
+                        cfg.group_size, rng, cfg.advantage_mode, run_vec=run_vec)))
             o = run.combat_obs()
-            rv = run_vec.unsqueeze(0) if run_vec is not None else None
-            a, t, _ = agent.policy.act(collate_combat([o]), greedy=greedy, run_vec=rv)
-            run.combat_step(int(a), int(o.enemy_slots[int(t)]) if int(t) >= 0 else -1)
+            [(a, t, _)] = yield [ActRequest(o, run_vec, greedy)]
+            run.combat_step(a, int(o.enemy_slots[t]) if t >= 0 else -1)
         elif run.phase == PHASE_MAP:
             rec.snapshot(run.run_state())
             node = choose_node(agent, run, rng, 0.0 if greedy else cfg.map_epsilon)
@@ -143,7 +169,8 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
 
 CHECKPOINT = "checkpoint.pt"
 # 이어서 학습할 때 바뀌어도 되는 설정. 나머지가 다르면 다른 실험이므로 거부한다.
-RESUMABLE_CHANGES = {"iterations", "out_dir", "torch_threads"}
+# device·parallel_runs 는 결과의 난수 순서만 바꾼다 (같은 실험).
+RESUMABLE_CHANGES = {"iterations", "out_dir", "torch_threads", "device", "parallel_runs"}
 
 
 def _atomic_save(obj, path: Path) -> None:
@@ -176,7 +203,8 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
     torch.manual_seed(cfg.seed)
     torch.set_num_threads(cfg.torch_threads)
     rng = np.random.default_rng(cfg.seed)
-    agent = Agent(run.vocab, cfg.d_model)
+    device = resolve_device(cfg.device)
+    agent = Agent(run.vocab, cfg.d_model).to(device)
     opt_eval = torch.optim.AdamW(agent.evaluator.parameters(), lr=cfg.lr_eval, weight_decay=0.01)
     opt_pol = torch.optim.Adam(agent.policy.parameters(), lr=cfg.lr_policy)
     buffer: list[Snapshot] = []
@@ -188,7 +216,7 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
     out.mkdir(parents=True, exist_ok=True)
     ckpt_path = out / CHECKPOINT
     if resume and ckpt_path.exists():
-        ck = torch.load(ckpt_path, weights_only=False)
+        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         _check_resume_config(ck["config"], cfg)
         agent.load_state_dict(ck["agent"])
         opt_eval.load_state_dict(ck["opt_eval"])
@@ -199,22 +227,32 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
         np.random.set_state(ck["rng"]["numpy_global"])
         random.setstate(ck["rng"]["python"])
         torch.set_rng_state(ck["rng"]["torch"])
-        if torch.cuda.is_available() and ck["rng"].get("cuda") is not None:
+        if device.type == "cuda" and ck["rng"].get("cuda") is not None:
             torch.cuda.set_rng_state_all(ck["rng"]["cuda"])
         log(f"resume: {ckpt_path} 에서 반복 {start} 부터 이어서 학습합니다 (목표 {cfg.iterations})")
     elif resume:
         log(f"resume: {ckpt_path} 가 없어서 처음부터 학습합니다")
     (out / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
+    log(f"device={device} parallel_runs={cfg.parallel_runs or cfg.runs_per_iter}")
+    n_par = max(1, min(cfg.parallel_runs or cfg.runs_per_iter, cfg.runs_per_iter))
+    sims = [run] + [run.spawn() for _ in range(n_par - 1)]
     for it in range(start, cfg.iterations):
         t0 = time.time()
         use_eval = len(buffer) >= cfg.warmup_snapshots
         results, groups = [], []
-        for r in range(cfg.runs_per_iter):
-            snaps, g, res = play_run(agent, run, cfg, rng, seed=int(rng.integers(2**31)), use_evaluator=use_eval)
-            n_runs += 1
-            (val_buffer if n_runs % cfg.val_every == 0 else buffer).extend(snaps)
-            groups.extend(g)
-            results.append(res)
+        # 런마다 시드와 난수 생성기를 따로 둔다: 나란히 진행하는 순서가 바뀌어도 각 런의 난수는 같다.
+        seeds = [int(rng.integers(2**31)) for _ in range(cfg.runs_per_iter)]
+        for c in range(0, len(seeds), n_par):
+            chunk = seeds[c : c + n_par]
+            outs = drive(agent.policy, [
+                play_run_steps(agent, sim, cfg, np.random.default_rng(sd), sd, use_evaluator=use_eval)
+                for sim, sd in zip(sims, chunk)
+            ])
+            for snaps, g, res in outs:
+                n_runs += 1
+                (val_buffer if n_runs % cfg.val_every == 0 else buffer).extend(snaps)
+                groups.extend(g)
+                results.append(res)
         buffer = buffer[-cfg.buffer_size:]
         val_buffer = val_buffer[-cfg.val_size:]
         ev_stats = train_evaluator(agent.evaluator, opt_eval, buffer, agent.vocab, epochs=cfg.eval_epochs,
@@ -256,4 +294,6 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
             },
         }, ckpt_path)
     _atomic_write_text(json.dumps(history, indent=2), out / "history.json")
+    for sim in sims[1:]:
+        sim.close()
     return agent

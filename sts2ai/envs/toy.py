@@ -481,6 +481,9 @@ class ToyRun:
         self.screen: dict | None = None
         self.phase = PHASE_MAP
 
+    def spawn(self) -> ToyRun:
+        return ToyRun(ascension=self.ascension)
+
     def clone(self, seed: int) -> ToyRun:
         """숨은 난수를 다시 뽑은 복사본. 이미 공개된 것(덱, 화면의 선택지)은 그대로다."""
         c = copy.deepcopy(self)

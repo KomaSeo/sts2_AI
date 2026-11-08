@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sts2ai.batching import collate_combat, collate_run  # noqa: E402
 from sts2ai.envs.toy import ToyRun  # noqa: E402
 from sts2ai.train.evaluator_train import make_labels  # noqa: E402
-from sts2ai.train.grpo import play  # noqa: E402
+from sts2ai.train.grpo import drive, play, play_steps  # noqa: E402
 from sts2ai.train.loop import Agent, Config, play_run  # noqa: E402
 
 
@@ -94,6 +94,16 @@ def main() -> None:
     dt = time.perf_counter() - t
     res["fork_rollouts_per_sec"] = n_fork / dt
     res["policy_steps_per_sec"] = steps / dt
+
+    # 2b) 같은 분기 전투를 한 배치로 같이 굴릴 때 (학습 루프가 실제로 쓰는 방식)
+    for dev in res["devices"]:
+        agent.to(dev)
+        t = time.perf_counter()
+        trajs = drive(agent.policy, [play_steps([run.fork_combat(k) for k in range(n_fork)])])[0]
+        dt = time.perf_counter() - t
+        res[f"fork_rollouts_per_sec[batched,{dev}]"] = n_fork / dt
+        res[f"policy_steps_per_sec[batched,{dev}]"] = sum(len(tr.actions) for tr in trajs) / dt
+    agent.to("cpu")
 
     # 3), 4) 학습 스텝
     snaps = snaps_all[:64]

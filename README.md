@@ -123,6 +123,24 @@ cd ../sts2 && bash scripts/build.sh && uv sync && cd -
 2. 전투 중 `run_action_mask`의 앞 32칸이 전투 행동 번호와 같다.
 3. 시뮬레이터가 2·3막(Hive, Glory)을 얼마나 구현했는지는 확인하지 않았다. 문서상으로는 1막 위주로 검증돼 있다.
 
+### 배치 롤아웃과 GPU
+
+학습 루프는 런 `--parallel-runs`판(기본값 0은 `--runs-per-iter` 전부)을 나란히 진행합니다. 그 런들의 GRPO 분기 전투와 진짜 전투가 매 스텝 요청하는 행동을 모아서 정책 forward 한 번으로 처리합니다(`grpo.drive`). 한 스텝의 배치는 최대 `parallel_runs × group_size` 정도입니다. 전투 코드는 정책이 필요할 때 `yield`로 행동을 요청하는 제너레이터로 되어 있습니다(`play_steps`, `rollout_group_steps`, `play_run_steps`).
+
+```bash
+.venv/bin/python scripts/train.py --env toy --iterations 30 --device auto   # GPU 가 있으면 cuda
+```
+
+CPU 4코어에서 잰 수치입니다(토이, 기본 설정, `--warmup-snapshots 50`).
+
+| | 반복 1회 (워밍업) | 반복 1회 (평가기 사용) |
+|---|---|---|
+| 이전 코드 (하나씩) | 17초 | 34초 |
+| `--parallel-runs 1` (그룹 안에서만 배치) | 11~15초 | 24초 |
+| `--parallel-runs 8` | 9초 | 12초 |
+
+`scripts/benchmark.py`에서 분기 전투 16개를 같이 굴리면 초당 23개에서 121개가 됩니다. GPU 수치는 아직 재지 않았습니다. 맵 노드 선택, 전투 시작 때의 `run_vec`, 기대값 선택기는 아직 런마다 따로 계산합니다.
+
 ### 클라우드에서 돌리기 (이어서 학습, 끝나면 인스턴스 종료)
 
 학습은 반복이 끝날 때마다 `<out-dir>/checkpoint.pt`에 전체 상태를 저장합니다. 저장되는 것은 가중치, 두 옵티마이저, 평가기 버퍼, 모든 난수 상태, 기록입니다. `--resume`을 주면 마지막으로 끝난 반복 다음부터 이어 갑니다. 끊겼다 이어도 끊기지 않고 돈 것과 같은 결과가 나오는지 테스트로 확인합니다(`test_resume_matches_uninterrupted_training`). 바꿀 수 있는 설정은 `--iterations`(목표 반복 수 늘리기)와 `--torch-threads`뿐이고, 나머지가 다르면 거부합니다.
