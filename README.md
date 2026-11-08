@@ -86,8 +86,13 @@ critic(가치망) 없이 그룹 평균이 기준선 역할을 하는 것이 GRPO
 
 런 안에서만 배우면 전투 에이전트는 카드 선택이 고른 카드만 많이 보게 됩니다. 그러면 "강한 카드"가 아니라 "전투 에이전트가 이미 잘 쓰는 카드"가 계속 뽑히는 쪽으로 굳습니다. 그래서 런 없이 무작위 상황을 만들어 모든 카드, 모든 적과 싸우게 합니다(`sts2ai/train/combat_train.py`).
 
-- **시나리오:** 무작위 덱(`--deck-min 10`~`--deck-max 50`장, 카드 풀 전체에서 고르고 `--upgrade-prob 0.2`로 강화), 무작위 포션(0~9개), 무작위 HP(1~125)로 만듭니다. 최대 HP는 [HP, 125]에서 뽑고, 유물은 없습니다.
-- **상대:** 반복마다 (조우, 막) 전체(토이에서는 6 × 3 = 18개)를 한 바퀴씩 돌아서 모든 적과 고르게 싸웁니다.
+- **시나리오:** 무작위 덱(`--deck-min 10`~`--deck-max 50`장, 카드 풀 전체에서 고르고 `--upgrade-prob 0.2`로 강화), 무작위 포션(0~9개)을 줍니다. 최대 HP는 1~125(`--max-hp-min`, `--max-hp-max`)에서, HP는 1~최대 HP에서 뽑습니다. 유물은 없습니다.
+- **상대:** 반복마다 두 가지 방식으로 고릅니다.
+  - **고루:** (조우, 막) 전체(토이에서는 6 × 3 = 18개)를 `--rounds-per-iter`바퀴 돕니다. 모든 적과 반드시 싸웁니다.
+  - **집중:** `--focus-per-iter`개(기본 18)를 '만났을 때 사망률'에 비례해 더 뽑습니다.
+  - 사망률은 학습 중 GRPO 시행의 결과로 (조우, 막)마다 지수이동평균을 냅니다(`--death-rate-ema 0.3`, 처음엔 모두 0.5).
+  - 뽑을 확률은 `max(사망률, --focus-floor)^--focus-power`에 비례합니다. 그래서 사망률이 0이 된 적도 가끔은 집중 쪽에서 뽑힙니다.
+  - 로그에 사망률이 높은 조우@막 상위 4개가 나옵니다.
 - **GRPO 그룹:** 같은 시나리오, **같은 시드**로 G번 싸웁니다. 셔플과 적 난수가 같으므로 시행끼리의 차이는 정책의 선택에서만 나옵니다.
 - **점수:** 이긴 시행은 항상 진 시행보다 높습니다.
   - 이김: `2 + clip(q/125, -1, 1)`, `q = ΔHP − 10·쓴 포션 수 + 1·Δ최대HP` → 범위 [1, 3]
@@ -100,8 +105,14 @@ critic(가치망) 없이 그룹 평균이 기준선 역할을 하는 것이 GRPO
 .venv/bin/python scripts/train_combat.py --iterations 200 --out-dir runs/combat
 ```
 ```bash
-.venv/bin/python scripts/train.py --env toy --init-policy runs/combat/combat_policy.pt   # 런 학습에 이어 붙이기
+.venv/bin/python scripts/train.py --env toy --init-policy runs/combat/combat_policy.pt   # 런 학습 (전투 정책 고정)
 ```
+
+**런 학습에서는 전투 에이전트를 고정합니다**(`freeze_policy`, 기본값). 런 학습은 다른 모델(평가기)을 학습하는 단계이기 때문입니다.
+- `--init-policy`로 불러온 전투 정책의 가중치를 바꾸지 않습니다. GRPO 분기와 업데이트를 아예 하지 않아서 반복도 훨씬 빨라집니다.
+- 평가기는 공유 임베딩의 복사본을 따로 가집니다. 평가기를 학습해도 전투 정책이 보는 표현이 바뀌지 않습니다. 복사본은 전투 정책의 임베딩에서 출발합니다.
+- 전투만 따로 학습한 정책은 RUN 토큰을 본 적이 없으므로 넣지 않습니다. 이 설정은 `agent.pt`에 같이 저장되어 `scripts/evaluate.py`에서도 유지됩니다.
+- `--init-policy` 없이 고정하려고 하면 에러가 납니다. 예전처럼 런 안에서 전투 정책도 같이 학습하려면 `--no-freeze-policy`를 주세요.
 
 실제 시뮬레이터는 임의의 덱, HP, 포션으로 전투를 시작하는 API(`make_combat`)를 아직 확인하지 못해서 토이에서만 됩니다.
 
@@ -114,7 +125,10 @@ uv venv .venv && uv pip install -r requirements.txt
 .venv/bin/python -m pytest -q tests
 ```
 ```bash
-.venv/bin/python scripts/train.py --env toy --iterations 30
+.venv/bin/python scripts/train_combat.py --iterations 200 --out-dir runs/combat   # 1) 전투 에이전트
+```
+```bash
+.venv/bin/python scripts/train.py --env toy --iterations 30 --init-policy runs/combat/combat_policy.pt   # 2) 평가기 (전투 고정)
 ```
 ```bash
 .venv/bin/python scripts/evaluate.py --ckpt runs/latest/agent.pt --runs 50
@@ -152,7 +166,7 @@ cd ../sts2 && bash scripts/build.sh && uv sync && cd -
 학습 루프는 런 `--parallel-runs`판(기본값 0은 `--runs-per-iter` 전부)을 나란히 진행합니다. 그 런들의 GRPO 분기 전투와 진짜 전투가 매 스텝 요청하는 행동을 모아서 정책 forward 한 번으로 처리합니다(`grpo.drive`). 한 스텝의 배치는 최대 `parallel_runs × group_size` 정도입니다. 전투 코드는 정책이 필요할 때 `yield`로 행동을 요청하는 제너레이터로 되어 있습니다(`play_steps`, `rollout_group_steps`, `play_run_steps`).
 
 ```bash
-.venv/bin/python scripts/train.py --env toy --iterations 30 --device auto   # GPU 가 있으면 cuda
+.venv/bin/python scripts/train.py --env toy --init-policy runs/combat/combat_policy.pt --iterations 30 --device auto   # GPU 가 있으면 cuda
 ```
 
 CPU 4코어에서 잰 수치입니다(토이, 기본 설정, `--warmup-snapshots 50`).
@@ -163,6 +177,8 @@ CPU 4코어에서 잰 수치입니다(토이, 기본 설정, `--warmup-snapshots
 | `--parallel-runs 1` (그룹 안에서만 배치) | 11~15초 | 24초 |
 | `--parallel-runs 8` | 9초 | 12초 |
 
+위 표는 런 안에서 전투 정책도 학습하던 설정(`--no-freeze-policy`)으로 잰 것입니다. 전투 정책을 고정하면 런 학습에는 GRPO 분기가 없고, 나란히 진행하는 런들의 진짜 전투만 한 배치로 묶입니다. 전투만 따로 학습할 때(`train_combat.py`)는 시나리오 전부 × 그룹 크기(기본 36 × 8)가 한 배치입니다.
+
 `scripts/benchmark.py`에서 분기 전투 16개를 같이 굴리면 초당 23개에서 121개가 됩니다. GPU 수치는 아직 재지 않았습니다. 맵 노드 선택, 전투 시작 때의 `run_vec`, 기대값 선택기는 아직 런마다 따로 계산합니다.
 
 ### 클라우드에서 돌리기 (이어서 학습, 끝나면 인스턴스 종료)
@@ -170,7 +186,7 @@ CPU 4코어에서 잰 수치입니다(토이, 기본 설정, `--warmup-snapshots
 학습은 반복이 끝날 때마다 `<out-dir>/checkpoint.pt`에 전체 상태를 저장합니다. 저장되는 것은 가중치, 두 옵티마이저, 평가기 버퍼, 모든 난수 상태, 기록입니다. `--resume`을 주면 마지막으로 끝난 반복 다음부터 이어 갑니다. 끊겼다 이어도 끊기지 않고 돈 것과 같은 결과가 나오는지 테스트로 확인합니다(`test_resume_matches_uninterrupted_training`). 바꿀 수 있는 설정은 `--iterations`(목표 반복 수 늘리기)와 `--torch-threads`뿐이고, 나머지가 다르면 거부합니다.
 
 ```bash
-.venv/bin/python scripts/train.py --env toy --iterations 200 --out-dir runs/a --resume
+.venv/bin/python scripts/train.py --env toy --init-policy runs/combat/combat_policy.pt --iterations 200 --out-dir runs/a --resume
 ```
 
 `scripts/cloud_train.sh`는 위 명령을 감싸서 다음을 합니다.
@@ -180,7 +196,7 @@ CPU 4코어에서 잰 수치입니다(토이, 기본 설정, `--warmup-snapshots
 - 시그널로 죽은 경우(스팟 회수, 시스템 종료)는 실패로 치지 않습니다.
 
 ```bash
-scripts/cloud_train.sh --out-dir runs/a --shutdown -- --env toy --iterations 200
+scripts/cloud_train.sh --out-dir runs/a --shutdown -- --env toy --init-policy runs/combat/combat_policy.pt --iterations 200
 ```
 
 부팅할 때 자동으로 실행하려면 systemd 서비스로 등록합니다. 경로는 환경에 맞게 바꾸세요.
@@ -195,7 +211,7 @@ Wants=network-online.target
 [Service]
 User=root
 WorkingDirectory=/opt/sts2_AI
-ExecStart=/opt/sts2_AI/scripts/cloud_train.sh --out-dir /data/runs/a --shutdown -- --env toy --iterations 200
+ExecStart=/opt/sts2_AI/scripts/cloud_train.sh --out-dir /data/runs/a --shutdown -- --env toy --init-policy /data/runs/combat/combat_policy.pt --iterations 200
 TimeoutStopSec=30
 
 [Install]

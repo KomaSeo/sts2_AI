@@ -4,8 +4,12 @@
 아니라 "전투 에이전트가 잘 쓰는 카드"가 계속 뽑히는 쪽으로 굳는다. 여기서는 상황을 무작위로 만들어
 모든 카드와 모든 적을 고르게 보여 준다.
 
-시나리오 하나 = (조우, 막) + 무작위 덱(10~50장) + 무작위 포션(0~9개) + 무작위 HP(1~125) + 시드.
-- (조우, 막) 은 env.combat_pool() 을 반복마다 한 바퀴씩 돌아서 모든 적과 고르게 싸운다.
+시나리오 하나 = (조우, 막) + 무작위 덱(10~50장) + 무작위 포션(0~9개) + 무작위 최대 HP(1~125)
+               + 무작위 HP(1~최대 HP) + 시드.
+- (조우, 막) 고르기 = 고루 + 집중
+  - 고루: 반복마다 env.combat_pool() 을 rounds_per_iter 바퀴 돈다. 모든 적과 반드시 싸운다.
+  - 집중: 추가로 focus_per_iter 개를 '만났을 때 사망률' 에 비례해 뽑는다. 사망률은 학습 중 GRPO 시행의
+    결과로 (조우, 막) 마다 지수이동평균을 낸다 (처음엔 모두 0.5). 잘 지는 적과 더 많이 싸운다.
 - GRPO 그룹: 같은 시나리오·같은 시드로 G 번 싸운다. 셔플과 적 난수가 같으므로 시행끼리의 차이는
   정책의 선택에서만 나온다.
 
@@ -41,15 +45,20 @@ CHECKPOINT = "combat_checkpoint.pt"
 @dataclass
 class CombatConfig:
     iterations: int = 200
-    rounds_per_iter: int = 1  # 반복마다 combat_pool 을 몇 바퀴 돌지 (토이: 한 바퀴 = 조우 6 × 막 3 = 18 시나리오)
+    rounds_per_iter: int = 1  # 고루: 반복마다 combat_pool 을 몇 바퀴 돌지 (토이: 한 바퀴 = 조우 6 × 막 3 = 18)
+    focus_per_iter: int = 18  # 집중: 사망률에 비례해 더 뽑을 시나리오 수
+    focus_power: float = 1.0  # 뽑을 확률 ∝ max(사망률, focus_floor) ** focus_power. 크면 더 치우친다
+    focus_floor: float = 0.05  # 사망률이 0 이 된 적도 가끔은 집중 쪽에서 뽑히게
+    death_rate_ema: float = 0.3  # 사망률 지수이동평균의 새 값 비중
     group_size: int = 8
     deck_min: int = 10
     deck_max: int = 50
     upgrade_prob: float = 0.2  # 덱의 카드 한 장이 강화돼 있을 확률
     potions_min: int = 0
     potions_max: int = 9
-    hp_min: int = 1
-    hp_max: int = 125  # 최대 HP 는 [HP, hp_max] 에서 뽑는다
+    max_hp_min: int = 1
+    max_hp_max: int = 125
+    hp_min: int = 1  # HP 는 [hp_min, 최대 HP] 에서 뽑는다
     potion_cost_hp: float = 10.0  # 포션 1개를 HP 몇과 같게 볼지
     max_hp_weight: float = 1.0  # 최대 HP 1 을 HP 몇과 같게 볼지
     loss_ranking: bool = True  # 진 시행끼리는 적에게 준 피해가 큰 쪽을 높게
@@ -84,8 +93,8 @@ def sample_scenario(env, rng: np.random.Generator, cfg: CombatConfig, encounter:
     deck = [(int(rng.choice(cards)), bool(rng.random() < cfg.upgrade_prob)) for _ in range(n_deck)]
     n_pot = int(rng.integers(cfg.potions_min, cfg.potions_max + 1))
     potions = [int(rng.choice(pots)) for _ in range(n_pot)]
-    hp = int(rng.integers(max(1, cfg.hp_min), cfg.hp_max + 1))
-    max_hp = int(rng.integers(hp, max(hp, cfg.hp_max) + 1))
+    max_hp = int(rng.integers(max(1, cfg.max_hp_min), cfg.max_hp_max + 1))
+    hp = int(rng.integers(min(max(1, cfg.hp_min), max_hp), max_hp + 1))
     return Scenario(encounter, act, deck, hp, max_hp, potions, int(rng.integers(2**31)))
 
 
@@ -94,6 +103,26 @@ def scenarios_for_round(env, rng: np.random.Generator, cfg: CombatConfig) -> lis
     pool = list(env.combat_pool())
     order = rng.permutation(len(pool))
     return [sample_scenario(env, rng, cfg, *pool[i]) for i in order]
+
+
+def plan_iteration(n_pool: int, death: np.ndarray, rng: np.random.Generator, cfg: CombatConfig) -> list[int]:
+    """이번 반복에 싸울 combat_pool 인덱스들. 고루(전부 rounds_per_iter 번) + 집중(사망률 비례)."""
+    idx = [int(i) for _ in range(cfg.rounds_per_iter) for i in rng.permutation(n_pool)]
+    if cfg.focus_per_iter > 0:
+        w = np.maximum(death, cfg.focus_floor) ** cfg.focus_power
+        idx += [int(i) for i in rng.choice(n_pool, size=cfg.focus_per_iter, p=w / w.sum())]
+    return idx
+
+
+def update_death_rates(death: np.ndarray, pool: list, groups: list[list[Trajectory]], scenarios: list[Scenario],
+                       beta: float) -> None:
+    """이번 반복 시행 결과로 (조우, 막) 별 사망률 지수이동평균을 갱신한다 (제자리)."""
+    where = {key: i for i, key in enumerate(pool)}
+    lost: dict[int, list[float]] = {}
+    for g, sc in zip(groups, scenarios):
+        lost.setdefault(where[(sc.encounter, sc.act)], []).extend(0.0 if t.won else 1.0 for t in g)
+    for i, v in lost.items():
+        death[i] = (1 - beta) * death[i] + beta * float(np.mean(v))
 
 
 def combat_score(won: bool, hp0: int, hp1: int, max0: int, max1: int, pots_used: int, damage_frac: float,
@@ -197,6 +226,8 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
     eval_set = [sc for _ in range(cfg.eval_rounds) for sc in scenarios_for_round(env, eval_rng, cfg)]
     history: list[dict] = []
     start = 0
+    pool = list(env.combat_pool())
+    death = np.full(len(pool), 0.5)  # (조우, 막) 별 사망률 추정
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     ckpt_path = out / CHECKPOINT
@@ -206,6 +237,7 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
         policy.load_state_dict(ck["policy"])
         opt.load_state_dict(ck["opt"])
         history, start = ck["history"], ck["next_iter"]
+        death = np.asarray(ck["death_rate"], dtype=np.float64)
         rng.bit_generator.state = ck["rng"]["numpy_generator"]
         np.random.set_state(ck["rng"]["numpy_global"])
         random.setstate(ck["rng"]["python"])
@@ -214,21 +246,26 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
             torch.cuda.set_rng_state_all(ck["rng"]["cuda"])
         log(f"resume: {ckpt_path} 에서 반복 {start} 부터 이어서 학습합니다 (목표 {cfg.iterations})")
     (out / "combat_config.json").write_text(json.dumps(asdict(cfg), indent=2))
-    log(f"device={device} 시나리오/반복={cfg.rounds_per_iter * len(env.combat_pool())} group={cfg.group_size}")
+    log(f"device={device} 시나리오/반복={cfg.rounds_per_iter * len(pool)}(고루)+{cfg.focus_per_iter}(집중) "
+        f"group={cfg.group_size}")
     for it in range(start, cfg.iterations):
         t0 = time.time()
-        scenarios = [sc for _ in range(cfg.rounds_per_iter) for sc in scenarios_for_round(env, rng, cfg)]
+        scenarios = [sample_scenario(env, rng, cfg, *pool[i]) for i in plan_iteration(len(pool), death, rng, cfg)]
         groups = drive(policy, [group_steps(env, sc, cfg) for sc in scenarios])
+        update_death_rates(death, pool, groups, scenarios, cfg.death_rate_ema)
         row = {"iter": it, **_summary(groups, scenarios, "")}
         row.update(grpo_update(policy, opt, groups, epochs=cfg.grpo_epochs))
         if cfg.eval_every and ((it + 1) % cfg.eval_every == 0 or it + 1 == cfg.iterations):
             policy.eval()
             row.update(evaluate_policy(policy, env, eval_set, cfg))
             policy.train()
+        row["death_rate"] = {f"{e}@{a}": round(float(d), 3) for (e, a), d in zip(pool, death)}
         row["sec"] = round(time.time() - t0, 1)
         history.append(row)
         log(" ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()
-                     if k != "eval_by_encounter"))
+                     if k not in ("eval_by_encounter", "death_rate")))
+        top = sorted(row["death_rate"].items(), key=lambda kv: -kv[1])[:4]
+        log("  사망률 높은 조우@막: " + " ".join(f"{k}={v:.2f}" for k, v in top))
         if "eval_by_encounter" in row:
             log("  eval 조우@막 승률: " + " ".join(f"{k}={v:.2f}" for k, v in row["eval_by_encounter"].items()))
         _atomic_save(policy.state_dict(), out / "combat_policy.pt")
@@ -239,6 +276,7 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
             "policy": policy.state_dict(),
             "opt": opt.state_dict(),
             "history": history,
+            "death_rate": death.tolist(),
             "rng": {
                 "numpy_generator": rng.bit_generator.state,
                 "numpy_global": np.random.get_state(),

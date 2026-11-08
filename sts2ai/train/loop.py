@@ -9,10 +9,16 @@
      - 나머지 화면은 규칙 정책.
   2) 모은 스냅숏으로 평가 에이전트를 학습한다 (노드 위험도 + 미래 막 위험도).
   3) 모은 GRPO 그룹으로 전투 에이전트를 학습한다.
+
+freeze_policy (기본): 전투 에이전트는 scripts/train_combat.py 로 따로 학습하고, 여기서는 고정한다.
+  - --init-policy 로 불러온 전투 정책의 가중치를 바꾸지 않는다 (GRPO 분기·업데이트를 아예 하지 않는다).
+  - 평가기는 공유 임베딩의 복사본을 따로 가진다. 평가기를 학습해도 전투 정책의 입력 표현이 안 바뀐다.
+  - 전투만 따로 학습한 정책은 RUN 토큰을 본 적이 없으므로 넣지 않는다.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import random
@@ -63,6 +69,8 @@ class Config:
     parallel_runs: int = 0
     # 처음 시작할 때 불러올 전투 정책 가중치 (scripts/train_combat.py 의 combat_policy.pt). 이어서 학습할 때는 무시
     init_policy: str = ""
+    # 전투 정책을 고정하고 평가기만 학습한다. 끄면 예전처럼 런 안에서 GRPO 로 전투 정책도 같이 학습
+    freeze_policy: bool = True
 
 
 def resolve_device(name: str) -> torch.device:
@@ -82,6 +90,26 @@ class Agent:
         # 기대값 선택기가 쓸 평가기. None 이면 self.evaluator. 전투 정책은 self.evaluator 의 run_vec 으로
         # 학습됐으므로, 선택기 쪽만 다른 평가기로 바꿔 실험할 때 쓴다.
         self.chooser_evaluator: Evaluator | None = None
+        # 전투 정책에 RUN 토큰을 넣을지. 전투만 따로 학습한 정책은 False (본 적 없는 입력)
+        self.policy_uses_run_vec = True
+
+    @property
+    def embeddings_split(self) -> bool:
+        return self.evaluator.encoder.emb is not self.emb
+
+    def split_embeddings(self) -> None:
+        """평가기에 공유 임베딩의 복사본을 따로 준다. 이후 평가기 학습이 전투 정책에 닿지 않는다."""
+        if self.embeddings_split:
+            return
+        dev, old = self.device, self.evaluator.state_dict()
+        self.evaluator = Evaluator(copy.deepcopy(self.emb)).to(dev)
+        self.evaluator.load_state_dict(old)
+
+    def freeze_policy(self) -> None:
+        self.split_embeddings()
+        self.policy.requires_grad_(False)
+        self.policy.eval()
+        self.policy_uses_run_vec = False
 
     def to(self, device) -> Agent:
         self.evaluator.to(device)
@@ -102,11 +130,15 @@ class Agent:
         return self.evaluator.run_vector(to_device(collate_run([state], self.vocab), self.device))[0]
 
     def state_dict(self):
-        return {"evaluator": self.evaluator.state_dict(), "policy": self.policy.state_dict()}
+        return {"evaluator": self.evaluator.state_dict(), "policy": self.policy.state_dict(),
+                "split_embeddings": self.embeddings_split, "policy_uses_run_vec": self.policy_uses_run_vec}
 
     def load_state_dict(self, sd):
-        self.evaluator.load_state_dict(sd["evaluator"])
+        if sd.get("split_embeddings"):
+            self.split_embeddings()
+        self.policy_uses_run_vec = sd.get("policy_uses_run_vec", True)
         self.policy.load_state_dict(sd["policy"])
+        self.evaluator.load_state_dict(sd["evaluator"])
 
 
 @torch.no_grad()
@@ -143,7 +175,7 @@ def play_run_steps(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Genera
                 last_combat = cid
                 n_combats += 1
                 # 전투가 시작될 때 한 번: 이 전투가 어느 노드에서 벌어지고 다음에 뭐가 오는지 (맵 포함)
-                run_vec = agent.run_vec(run.run_state()) if cfg.policy_sees_map else None
+                run_vec = agent.run_vec(run.run_state()) if cfg.policy_sees_map and agent.policy_uses_run_vec else None
                 if collect_grpo and n_combats % cfg.grpo_every_n_combats == 0:
                     groups.append((yield from rollout_group_steps(
                         run, agent.evaluator if use_evaluator else None,
@@ -207,6 +239,8 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
     rng = np.random.default_rng(cfg.seed)
     device = resolve_device(cfg.device)
     agent = Agent(run.vocab, cfg.d_model).to(device)
+    if cfg.freeze_policy:
+        agent.freeze_policy()  # 옵티마이저를 만들기 전에: 평가기 옵티마이저가 평가기 쪽 임베딩만 갖게
     opt_eval = torch.optim.AdamW(agent.evaluator.parameters(), lr=cfg.lr_eval, weight_decay=0.01)
     opt_pol = torch.optim.Adam(agent.policy.parameters(), lr=cfg.lr_policy)
     buffer: list[Snapshot] = []
@@ -235,9 +269,15 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
     elif resume:
         log(f"resume: {ckpt_path} 가 없어서 처음부터 학습합니다")
     if start == 0 and cfg.init_policy:
-        # 정책과 평가기가 공유 임베딩을 같이 쓰므로, 불러온 임베딩이 평가기의 출발점도 된다
         agent.policy.load_state_dict(torch.load(cfg.init_policy, map_location="cpu"))
-        log(f"init_policy: {cfg.init_policy} 의 전투 정책으로 시작합니다")
+        # 불러온 임베딩이 평가기의 출발점도 된다 (공유면 이미 같고, 나눴으면 복사)
+        if agent.embeddings_split:
+            agent.evaluator.encoder.emb.load_state_dict(agent.emb.state_dict())
+        log(f"init_policy: {cfg.init_policy} 의 전투 정책으로 시작합니다"
+            + (" (고정)" if cfg.freeze_policy else ""))
+    elif start == 0 and cfg.freeze_policy:
+        raise ValueError("전투 정책을 고정(freeze_policy)하려면 --init-policy 로 학습된 전투 정책을 주세요 "
+                         "(scripts/train_combat.py). 런 안에서 전투 정책도 학습하려면 --no-freeze-policy.")
     (out / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
     log(f"device={device} parallel_runs={cfg.parallel_runs or cfg.runs_per_iter}")
     n_par = max(1, min(cfg.parallel_runs or cfg.runs_per_iter, cfg.runs_per_iter))
@@ -251,7 +291,8 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
         for c in range(0, len(seeds), n_par):
             chunk = seeds[c : c + n_par]
             outs = drive(agent.policy, [
-                play_run_steps(agent, sim, cfg, np.random.default_rng(sd), sd, use_evaluator=use_eval)
+                play_run_steps(agent, sim, cfg, np.random.default_rng(sd), sd, use_evaluator=use_eval,
+                               collect_grpo=not cfg.freeze_policy)
                 for sim, sd in zip(sims, chunk)
             ])
             for snaps, g, res in outs:
@@ -263,7 +304,7 @@ def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
         val_buffer = val_buffer[-cfg.val_size:]
         ev_stats = train_evaluator(agent.evaluator, opt_eval, buffer, agent.vocab, epochs=cfg.eval_epochs,
                                    val=val_buffer or None)
-        pg_stats = grpo_update(agent.policy, opt_pol, groups, epochs=cfg.grpo_epochs)
+        pg_stats = {} if cfg.freeze_policy else grpo_update(agent.policy, opt_pol, groups, epochs=cfg.grpo_epochs)
         group_win = float(np.mean([t.won for g in groups for t in g])) if groups else 0.0
         row = {
             "iter": it,

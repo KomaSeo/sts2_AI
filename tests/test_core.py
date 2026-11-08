@@ -198,7 +198,8 @@ def _tiny_cfg(out_dir, iterations):
     from sts2ai.train.loop import Config
 
     return Config(iterations=iterations, runs_per_iter=1, group_size=2, grpo_every_n_combats=3, d_model=16,
-                  eval_epochs=1, grpo_epochs=1, warmup_snapshots=3, val_every=2, out_dir=str(out_dir))
+                  eval_epochs=1, grpo_epochs=1, warmup_snapshots=3, val_every=2, out_dir=str(out_dir),
+                  freeze_policy=False)
 
 
 def _train_tiny(out_dir, iterations, resume=False):
@@ -226,7 +227,7 @@ def test_resume_matches_uninterrupted_training(tmp_path):
     resumed = _train_tiny(tmp_path / "split", 4, resume=True)
 
     a, b = full.state_dict(), resumed.state_dict()
-    for part in a:
+    for part in ("evaluator", "policy"):
         for k in a[part]:
             assert torch.equal(a[part][k], b[part][k]), (part, k)
     hist = lambda d: [{k: v for k, v in r.items() if k != "sec"} for r in json.loads((d / "history.json").read_text())]
@@ -331,6 +332,7 @@ def test_combat_scenarios_cover_pool_within_ranges():
     for sc in scs:
         assert 10 <= len(sc.deck) <= 50 and 0 <= len(sc.potions) <= 9
         assert 1 <= sc.hp <= sc.max_hp <= 125
+    assert min(sc.max_hp for sc in scs) <= 10 and max(sc.max_hp for sc in scs) >= 115
     assert min(len(sc.deck) for sc in scs) <= 12 and max(len(sc.deck) for sc in scs) >= 48
     assert {cid for sc in scs for cid, _ in sc.deck} == set(env.card_pool())
 
@@ -378,9 +380,76 @@ def test_run_training_starts_from_combat_policy(tmp_path):
     pol = CombatPolicy(SharedEmbeddings(ToyRun.vocab, 16))
     torch.save(pol.state_dict(), tmp_path / "combat_policy.pt")
     cfg = _tiny_cfg(tmp_path / "run", 0)
+    cfg.freeze_policy = True
     cfg.init_policy = str(tmp_path / "combat_policy.pt")
     agent = train(ToyRun(), cfg, log=lambda *_: None)
     for k, v in pol.state_dict().items():
         assert torch.equal(v, agent.policy.state_dict()[k]), k
     # 공유 임베딩이라 평가기 쪽 임베딩도 같이 바뀐다
     assert agent.emb is agent.policy.encoder.emb and torch.equal(agent.emb.card.weight, pol.encoder.emb.card.weight)
+
+
+def test_focus_sampling_covers_all_and_favours_deadly():
+    """모든 (조우, 막) 과 반드시 싸우고, 사망률이 높은 쪽을 더 많이 뽑는다."""
+    from sts2ai.train.combat_train import CombatConfig, plan_iteration
+
+    cfg = CombatConfig(focus_per_iter=2000)
+    death = np.full(18, 0.05)
+    death[[4, 9]] = [0.9, 0.45]
+    idx = plan_iteration(18, death, np.random.default_rng(0), cfg)
+    assert sorted(idx[:18]) == list(range(18))  # 고루 한 바퀴
+    counts = np.bincount(idx[18:], minlength=18)
+    assert counts[4] > 1.6 * counts[9] > 3 * counts[0]
+    assert counts.min() > 0  # 사망률 바닥값 덕에 전부 가끔은 뽑힌다
+
+
+def test_death_rates_track_losses():
+    from sts2ai.train.combat_train import Scenario, update_death_rates
+    from sts2ai.train.grpo import Trajectory
+
+    pool = [(1, 0), (2, 0)]
+    death = np.array([0.5, 0.5])
+    sc = lambda e: Scenario(e, 0, [], 1, 1, [], 0)
+    groups = [[Trajectory(won=False)] * 4, [Trajectory(won=True)] * 4]
+    for _ in range(20):
+        update_death_rates(death, pool, groups, [sc(1), sc(2)], 0.3)
+    assert death[0] > 0.99 and death[1] < 0.01
+
+
+def test_frozen_policy_does_not_change_while_evaluator_trains(tmp_path):
+    """다른 모델(평가기)을 학습해도 전투 정책은 가중치도, 임베딩도 그대로다."""
+    from sts2ai.encoders import SharedEmbeddings
+    from sts2ai.train.combat_train import CombatPolicy
+    from sts2ai.train.loop import train
+
+    pol = CombatPolicy(SharedEmbeddings(ToyRun.vocab, 16))
+    torch.save(pol.state_dict(), tmp_path / "p.pt")
+    cfg = _tiny_cfg(tmp_path / "run", 3)
+    cfg.freeze_policy, cfg.init_policy = True, str(tmp_path / "p.pt")
+    agent = train(ToyRun(), cfg, log=lambda *_: None)
+    for k, v in pol.state_dict().items():
+        assert torch.equal(v, agent.policy.state_dict()[k]), k
+    assert agent.embeddings_split and not agent.policy_uses_run_vec
+    assert not torch.equal(agent.evaluator.encoder.emb.card.weight, pol.encoder.emb.card.weight)  # 평가기는 배움
+    hist = __import__("json").loads((tmp_path / "run" / "history.json").read_text())
+    assert all("grpo_steps" not in r for r in hist)  # GRPO 분기·업데이트 없음
+
+    # 저장한 에이전트를 다시 불러도 나뉜 임베딩·RUN 토큰 설정이 유지된다 (scripts/evaluate.py 경로)
+    fresh = Agent(ToyRun.vocab, 16)
+    fresh.load_state_dict(torch.load(tmp_path / "run" / "agent.pt"))
+    assert fresh.embeddings_split and not fresh.policy_uses_run_vec
+    for k, v in agent.evaluator.state_dict().items():
+        assert torch.equal(v, fresh.evaluator.state_dict()[k]), k
+    for k, v in pol.state_dict().items():
+        assert torch.equal(v, fresh.policy.state_dict()[k]), k
+
+
+def test_freeze_requires_a_trained_policy(tmp_path):
+    import pytest
+
+    from sts2ai.train.loop import train
+
+    cfg = _tiny_cfg(tmp_path, 1)
+    cfg.freeze_policy = True
+    with pytest.raises(ValueError, match="init-policy"):
+        train(ToyRun(), cfg, log=lambda *_: None)
