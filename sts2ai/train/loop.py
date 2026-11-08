@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import os
+import random
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -139,7 +141,38 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
     return snaps, groups, result
 
 
-def train(run: RunSim, cfg: Config, log=print) -> Agent:
+CHECKPOINT = "checkpoint.pt"
+# 이어서 학습할 때 바뀌어도 되는 설정. 나머지가 다르면 다른 실험이므로 거부한다.
+RESUMABLE_CHANGES = {"iterations", "out_dir", "torch_threads"}
+
+
+def _atomic_save(obj, path: Path) -> None:
+    """쓰는 도중 인스턴스가 꺼져도 이전 파일이 깨지지 않게 임시 파일에 쓰고 바꿔 끼운다."""
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
+def _atomic_write_text(text: str, path: Path) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def _check_resume_config(saved: dict, cfg: Config) -> None:
+    now = asdict(cfg)
+    diff = {k: (saved.get(k), v) for k, v in now.items() if k not in RESUMABLE_CHANGES and saved.get(k) != v}
+    if diff:
+        lines = ", ".join(f"{k}: {a!r} -> {b!r}" for k, (a, b) in diff.items())
+        raise ValueError(f"체크포인트와 설정이 다릅니다 ({lines}). 다른 --out-dir 를 쓰거나 설정을 맞추세요.")
+
+
+def train(run: RunSim, cfg: Config, log=print, resume: bool = False) -> Agent:
+    """resume=True 이고 out_dir 에 체크포인트가 있으면 마지막으로 끝난 반복 다음부터 이어서 학습한다.
+
+    체크포인트에는 가중치뿐 아니라 옵티마이저, 평가기 버퍼, 난수 상태, 기록까지 들어 있어서
+    중간에 끊겼다가 이어도 끊기지 않고 돈 것과 같은 결과가 나온다.
+    """
     torch.manual_seed(cfg.seed)
     torch.set_num_threads(cfg.torch_threads)
     rng = np.random.default_rng(cfg.seed)
@@ -149,11 +182,30 @@ def train(run: RunSim, cfg: Config, log=print) -> Agent:
     buffer: list[Snapshot] = []
     val_buffer: list[Snapshot] = []
     n_runs = 0
+    history = []
+    start = 0
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    ckpt_path = out / CHECKPOINT
+    if resume and ckpt_path.exists():
+        ck = torch.load(ckpt_path, weights_only=False)
+        _check_resume_config(ck["config"], cfg)
+        agent.load_state_dict(ck["agent"])
+        opt_eval.load_state_dict(ck["opt_eval"])
+        opt_pol.load_state_dict(ck["opt_pol"])
+        buffer, val_buffer = ck["buffer"], ck["val_buffer"]
+        n_runs, history, start = ck["n_runs"], ck["history"], ck["next_iter"]
+        rng.bit_generator.state = ck["rng"]["numpy_generator"]
+        np.random.set_state(ck["rng"]["numpy_global"])
+        random.setstate(ck["rng"]["python"])
+        torch.set_rng_state(ck["rng"]["torch"])
+        if torch.cuda.is_available() and ck["rng"].get("cuda") is not None:
+            torch.cuda.set_rng_state_all(ck["rng"]["cuda"])
+        log(f"resume: {ckpt_path} 에서 반복 {start} 부터 이어서 학습합니다 (목표 {cfg.iterations})")
+    elif resume:
+        log(f"resume: {ckpt_path} 가 없어서 처음부터 학습합니다")
     (out / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
-    history = []
-    for it in range(cfg.iterations):
+    for it in range(start, cfg.iterations):
         t0 = time.time()
         use_eval = len(buffer) >= cfg.warmup_snapshots
         results, groups = [], []
@@ -183,6 +235,25 @@ def train(run: RunSim, cfg: Config, log=print) -> Agent:
         }
         history.append(row)
         log(" ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()))
-        torch.save(agent.state_dict(), out / "agent.pt")
-    (out / "history.json").write_text(json.dumps(history, indent=2))
+        _atomic_save(agent.state_dict(), out / "agent.pt")
+        _atomic_write_text(json.dumps(history, indent=2), out / "history.json")
+        _atomic_save({
+            "next_iter": it + 1,
+            "config": asdict(cfg),
+            "agent": agent.state_dict(),
+            "opt_eval": opt_eval.state_dict(),
+            "opt_pol": opt_pol.state_dict(),
+            "buffer": buffer,
+            "val_buffer": val_buffer,
+            "n_runs": n_runs,
+            "history": history,
+            "rng": {
+                "numpy_generator": rng.bit_generator.state,
+                "numpy_global": np.random.get_state(),
+                "python": random.getstate(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            },
+        }, ckpt_path)
+    _atomic_write_text(json.dumps(history, indent=2), out / "history.json")
     return agent

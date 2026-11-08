@@ -123,6 +123,52 @@ cd ../sts2 && bash scripts/build.sh && uv sync && cd -
 2. 전투 중 `run_action_mask`의 앞 32칸이 전투 행동 번호와 같다.
 3. 시뮬레이터가 2·3막(Hive, Glory)을 얼마나 구현했는지는 확인하지 않았다. 문서상으로는 1막 위주로 검증돼 있다.
 
+### 클라우드에서 돌리기 (이어서 학습, 끝나면 인스턴스 종료)
+
+학습은 반복이 끝날 때마다 `<out-dir>/checkpoint.pt`에 전체 상태를 저장합니다. 저장되는 것은 가중치, 두 옵티마이저, 평가기 버퍼, 모든 난수 상태, 기록입니다. `--resume`을 주면 마지막으로 끝난 반복 다음부터 이어 갑니다. 끊겼다 이어도 끊기지 않고 돈 것과 같은 결과가 나오는지 테스트로 확인합니다(`test_resume_matches_uninterrupted_training`). 바꿀 수 있는 설정은 `--iterations`(목표 반복 수 늘리기)와 `--torch-threads`뿐이고, 나머지가 다르면 거부합니다.
+
+```bash
+.venv/bin/python scripts/train.py --env toy --iterations 200 --out-dir runs/a --resume
+```
+
+`scripts/cloud_train.sh`는 위 명령을 감싸서 다음을 합니다.
+- 항상 `--resume`으로 실행합니다. 스팟 회수로 꺼졌다가 다시 켜지면 이어서 학습합니다.
+- 끝나면 `DONE`, 실패하면 `FAILED` 표시 파일을 남깁니다. 둘 중 하나가 있으면 부팅 때 다시 학습하지 않습니다.
+- `--shutdown`을 줬을 때만, 끝난 뒤(성공이든 실패든) 1분 뒤에 `shutdown -h`로 인스턴스를 끕니다. 로컬 PC에서는 빼고 쓰세요.
+- 시그널로 죽은 경우(스팟 회수, 시스템 종료)는 실패로 치지 않습니다.
+
+```bash
+scripts/cloud_train.sh --out-dir runs/a --shutdown -- --env toy --iterations 200
+```
+
+부팅할 때 자동으로 실행하려면 systemd 서비스로 등록합니다. 경로는 환경에 맞게 바꾸세요.
+
+```ini
+# /etc/systemd/system/sts2-train.service
+[Unit]
+Description=sts2_AI training
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/sts2_AI
+ExecStart=/opt/sts2_AI/scripts/cloud_train.sh --out-dir /data/runs/a --shutdown -- --env toy --iterations 200
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now sts2-train
+```
+
+인스턴스를 끄면 과금이 멈추는지는 서비스마다 다릅니다. 쓰기 전에 각 서비스의 문서로 확인하세요.
+- **AWS EC2, GCP Compute Engine:** OS에서 끄면 인스턴스가 '정지' 상태가 되고 CPU·GPU 요금은 멈춥니다. 디스크 요금은 계속 나옵니다. 인스턴스 종료 동작이 'terminate'로 설정돼 있으면 루트 디스크가 지워질 수 있으니, `--out-dir`은 따로 붙인 볼륨에 두세요.
+- **스팟 인스턴스:** 회수되면 그 인스턴스의 디스크가 사라질 수 있습니다. 이어서 학습하려면 체크포인트가 영구 볼륨에 있어야 합니다(예: AWS의 영구 스팟 요청 + 중단 동작 'stop').
+- **Hetzner Cloud:** 꺼져 있어도 서버 요금이 나옵니다. 요금을 멈추려면 서버를 삭제해야 합니다.
+- **vast.ai, RunPod 같은 컨테이너형 GPU 대여:** 컨테이너 안에서 `shutdown`해도 과금이 멈추지 않습니다. `SHUTDOWN_CMD`에 그 서비스의 정지 명령을 넣으세요. 예: `SHUTDOWN_CMD='vastai stop instance $CONTAINER_ID'`.
+
 ## 토이 게임 결과
 
 설정: `--iterations 30 --runs-per-iter 8 --group-size 8`, d_model 64, CPU 기준 약 25분. 평가는 학습에 쓰지 않은 시드 50판으로 했습니다. 각 설정을 시드 하나로 한 번씩만 학습했으므로, 버전 사이의 작은 차이는 우연일 수 있습니다.

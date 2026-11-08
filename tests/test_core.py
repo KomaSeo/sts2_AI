@@ -192,3 +192,55 @@ def test_chooser_values_random_transform_by_expectation():
     transform, leave = 0, 1
     # 타격 하나를 변환하면 최소 +0.5, 8장 중 1장 꼴로 Heavy Blade 가 나와 +2 가 더해진다
     assert vals[transform] > vals[leave] + 0.5
+
+
+def _tiny_cfg(out_dir, iterations):
+    from sts2ai.train.loop import Config
+
+    return Config(iterations=iterations, runs_per_iter=1, group_size=2, grpo_every_n_combats=3, d_model=16,
+                  eval_epochs=1, grpo_epochs=1, warmup_snapshots=3, val_every=2, out_dir=str(out_dir))
+
+
+def _train_tiny(out_dir, iterations, resume=False):
+    from sts2ai.train.loop import train
+
+    return train(ToyRun(), _tiny_cfg(out_dir, iterations), log=lambda *_: None, resume=resume)
+
+
+def test_resume_matches_uninterrupted_training(tmp_path):
+    """2 반복 + 이어서 2 반복 == 끊기지 않은 4 반복 (가중치·기록 모두)."""
+    import json
+    import random
+
+    def seed_globals():  # 학습 코드가 쓰는 전역 난수(셔플)도 같은 출발점에서
+        random.seed(1)
+        np.random.seed(1)
+
+    seed_globals()
+    full = _train_tiny(tmp_path / "full", 4)
+    seed_globals()
+    _train_tiny(tmp_path / "split", 2)
+    random.seed(999)  # 끊긴 사이에 다른 코드가 난수를 써도 체크포인트에서 되살린다
+    np.random.seed(999)
+    torch.manual_seed(999)
+    resumed = _train_tiny(tmp_path / "split", 4, resume=True)
+
+    a, b = full.state_dict(), resumed.state_dict()
+    for part in a:
+        for k in a[part]:
+            assert torch.equal(a[part][k], b[part][k]), (part, k)
+    hist = lambda d: [{k: v for k, v in r.items() if k != "sec"} for r in json.loads((d / "history.json").read_text())]
+    assert hist(tmp_path / "full") == hist(tmp_path / "split")
+    assert len(hist(tmp_path / "split")) == 4
+
+
+def test_resume_rejects_changed_config(tmp_path):
+    import pytest
+
+    from sts2ai.train.loop import train
+
+    _train_tiny(tmp_path, 1)
+    cfg = _tiny_cfg(tmp_path, 2)
+    cfg.lr_policy = 1e-2
+    with pytest.raises(ValueError, match="lr_policy"):
+        train(ToyRun(), cfg, log=lambda *_: None, resume=True)
