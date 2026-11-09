@@ -218,6 +218,8 @@ CPU 4코어에서 잰 수치입니다(토이, 기본 설정, `--warmup-snapshots
 
 ### 클라우드에서 돌리기 (이어서 학습, 끝나면 인스턴스 종료)
 
+**AWS 스팟 GPU 단계별 안내는 [docs/aws.md](docs/aws.md)에 있습니다.** 새 서버에서는 `scripts/cloud_setup.sh`가 설치, zhiyue 고정 커밋 받기, 테스트, GPU 시험 학습을 한 번에 합니다. `scripts/cloud_sweep.sh`는 `experiments/`의 계획 파일대로 실험 여러 개를 동시에 돌리고, 전부 끝나야 서버를 끕니다.
+
 학습은 반복이 끝날 때마다 `<out-dir>/checkpoint.pt`에 전체 상태를 저장합니다. 저장되는 것은 가중치, 두 옵티마이저, 평가기 버퍼, 모든 난수 상태, 기록입니다. `--resume`을 주면 마지막으로 끝난 반복 다음부터 이어 갑니다. 끊겼다 이어도 끊기지 않고 돈 것과 같은 결과가 나오는지 테스트로 확인합니다(`test_resume_matches_uninterrupted_training`). 바꿀 수 있는 설정은 `--iterations`(목표 반복 수 늘리기)와 `--torch-threads`뿐이고, 나머지가 다르면 거부합니다.
 
 ```bash

@@ -1,0 +1,13 @@
+# 모델 크기·학습률 비교 (전투 에이전트만 따로 학습, 유물 0~40, 검증 400판)
+# 실행: scripts/cloud_sweep.sh --plan experiments/size_lr.txt --runs-dir runs/size_lr --shutdown
+# 모두 처음부터 같은 시드로 학습한다 (크기가 다르면 기존 체크포인트에서 이어 갈 수 없다).
+# --iterations 는 scripts/cloud_setup.sh --bench 로 반복 1회 시간을 잰 뒤 예산에 맞게 고친다.
+@script scripts/train_combat.py
+@common --env zhiyue --zhiyue-path ../sts2-rl-agent --device cuda
+@common --relics-max 40 --iterations 60 --eval-every 5 --eval-rounds 5
+
+d64_l3      --d-model 64  --layers 3 --heads 4                     # 지금 크기 (파라미터 22만)
+d128_l4     --d-model 128 --layers 4 --heads 4                     # 81만
+d256_l6     --d-model 256 --layers 6 --heads 8                     # 388만
+d64_lr1e-3  --d-model 64  --layers 3 --heads 4 --lr-policy 1e-3    # 학습률 3배
+d64_ep4     --d-model 64  --layers 3 --heads 4 --grpo-epochs 4     # 같은 데이터로 업데이트 2배

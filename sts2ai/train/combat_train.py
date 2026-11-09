@@ -69,7 +69,9 @@ class CombatConfig:
     loss_ranking: bool = True  # 진 시행끼리는 적에게 준 피해가 큰 쪽을 높게
     advantage_mode: str = "zscore"
     max_steps: int = 300
-    d_model: int = 64
+    d_model: int = 64  # 모델 폭 (임베딩·토큰 차원). heads 로 나누어떨어져야 한다
+    layers: int = 3  # 전투 Transformer 층 수
+    heads: int = 4  # attention 헤드 수
     lr_policy: float = 3e-4
     grpo_epochs: int = 2
     eval_every: int = 10  # 반복 N 번마다 고정된 검증 시나리오를 greedy 로 평가 (0 이면 끔)
@@ -239,7 +241,9 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
     torch.set_num_threads(cfg.torch_threads)
     rng = np.random.default_rng(cfg.seed)
     device = resolve_device(cfg.device)
-    policy = CombatPolicy(SharedEmbeddings(env.vocab, cfg.d_model)).to(device)
+    policy = CombatPolicy(SharedEmbeddings(env.vocab, cfg.d_model), layers=cfg.layers, heads=cfg.heads).to(device)
+    log(f"모델: d_model={cfg.d_model} layers={cfg.layers} heads={cfg.heads} "
+        f"파라미터 {sum(p.numel() for p in policy.parameters()):,}개")
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr_policy)
     # 검증 시나리오는 학습 난수와 따로 고정
     eval_rng = np.random.default_rng(10**6 + cfg.seed)

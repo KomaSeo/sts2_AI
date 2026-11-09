@@ -44,8 +44,9 @@ def main() -> None:
 
     env = ZhiyueCombatEnv(args.zhiyue_path)
     cfg_path = Path(args.ckpt).with_name("combat_config.json")
-    d_model = json.loads(cfg_path.read_text())["d_model"] if cfg_path.exists() else 64
-    policy = CombatPolicy(SharedEmbeddings(env.vocab, d_model))
+    saved = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    policy = CombatPolicy(SharedEmbeddings(env.vocab, saved.get("d_model", 64)),
+                          layers=saved.get("layers", 3), heads=saved.get("heads", 4))
     policy.load_state_dict(torch.load(args.ckpt, map_location="cpu"))
     policy.eval()
     torch.manual_seed(args.seed)

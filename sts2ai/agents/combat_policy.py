@@ -26,10 +26,10 @@ class PolicyOut:
 
 
 class CombatPolicy(nn.Module):
-    def __init__(self, emb: SharedEmbeddings, layers: int = 3):
+    def __init__(self, emb: SharedEmbeddings, layers: int = 3, heads: int = 4):
         super().__init__()
         d = emb.d
-        self.encoder = CombatEncoder(emb, layers=layers)
+        self.encoder = CombatEncoder(emb, layers=layers, heads=heads)
         self.action = nn.Sequential(nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 1))
         self.tq = nn.Linear(d, d)
         self.tk = nn.Linear(d, d)
