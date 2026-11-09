@@ -112,7 +112,7 @@ grep -h "eval_win_rate" runs/size_lr/*/train.log | grep -oE "^iter=[0-9]+|eval_w
 ```bash
 scp -i my-key.pem -r ubuntu@<IP>:sts2_AI/runs/size_lr ./
 ```
-`combat_history.json`(반복별 기록)과 `combat_policy.pt`(가중치)가 있으면 학습 곡선 비교와 전투 리플레이(`scripts/show_combat.py`)를 만들 수 있습니다. 서버가 꺼져 있어도 디스크는 남아 있으니, 콘솔에서 다시 시작해 받으면 됩니다(서비스가 다시 돌지만 모두 DONE이라 바로 다시 꺼집니다. 받는 동안 꺼지지 않게 하려면 먼저 `sudo systemctl disable --now sts2-sweep`).
+`combat_history.json`(반복별 기록)과 `combat_policy.pt`(가중치)가 있으면 학습 곡선 비교와 전투 리플레이(`scripts/show_combat.py`)를 만들 수 있습니다. 서버가 꺼져 있어도 디스크는 남아 있으니, 콘솔에서 다시 시작해 받으면 됩니다. 서비스가 다시 돌지만 모든 실험이 이미 끝나 있으면 서버를 끄지 않습니다. 다른 계획을 걸기 전까지는 `sudo systemctl disable --now sts2-sweep`로 서비스를 꺼 두세요.
 
 ## 8. 정리 (다 끝났을 때)
 

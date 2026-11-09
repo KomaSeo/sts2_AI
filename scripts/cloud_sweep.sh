@@ -13,6 +13,8 @@
 # - --parallel N: 동시에 돌릴 실험 수 (기본: 전부). 실험 하나가 CPU 1코어를 쓴다.
 # - --shutdown: 모든 실험이 DONE/FAILED 가 되면 끈다 (SHUTDOWN_CMD, SHUTDOWN_DELAY_MIN 은 cloud_train.sh 와 같음).
 #   시그널로 중단된 경우(스팟 회수, 시스템 종료)에는 끄지 않는다.
+#   이번 실행에서 돌린 실험이 하나도 없으면(이미 모두 끝남) 끄지 않는다: 결과를 받으려고 서버를 다시 켰을 때
+#   부팅하자마자 다시 꺼지지 않게.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,9 +68,15 @@ power_off() {
 INTERRUPTED=0
 trap 'INTERRUPTED=1; kill -TERM $(jobs -p) 2>/dev/null' TERM INT
 log "실험 ${#NAMES[@]}개 (동시 $PARALLEL): ${NAMES[*]}"
+LAUNCHED=0
 for name in "${NAMES[@]}"; do
+    if [[ -e "$RUNS/$name/DONE" || -e "$RUNS/$name/FAILED" ]]; then
+        log "건너뜀: $name (이미 $(ls "$RUNS/$name" | grep -E '^(DONE|FAILED)$'))"
+        continue
+    fi
     while [[ $(jobs -rp | wc -l) -ge $PARALLEL ]]; do wait -n; done
     [[ $INTERRUPTED == 1 ]] && break
+    LAUNCHED=$((LAUNCHED + 1))
     # shellcheck disable=SC2206
     extra=(${ARGS[$name]})
     "$REPO/scripts/cloud_train.sh" --script "$SCRIPT" --out-dir "$RUNS/$name" "${PY_ARGS[@]}" \
@@ -88,5 +96,9 @@ if [[ $INTERRUPTED == 1 || ${#pending[@]} -gt 0 ]]; then
     log "중단된 실험이 있어 서버를 끄지 않습니다. 다시 실행하면 이어서 돕니다."
     exit 1
 fi
-power_off
+if [[ $LAUNCHED == 0 ]]; then
+    log "이번에 돌린 실험이 없어(이미 모두 끝남) 서버를 끄지 않습니다."
+else
+    power_off
+fi
 [[ ${#failed[@]} -eq 0 ]]
