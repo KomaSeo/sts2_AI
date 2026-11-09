@@ -8,7 +8,7 @@
                + 무작위 HP(1~최대 HP) + 시드.
 - (조우, 막) 고르기 = 고루 + 집중
   - 고루: 반복마다 env.combat_pool() 을 rounds_per_iter 바퀴 돈다. 모든 적과 반드시 싸운다.
-  - 집중: 추가로 focus_per_iter 개를 '만났을 때 사망률' 에 비례해 뽑는다. 사망률은 학습 중 GRPO 시행의
+  - 집중: 추가로 focus_per_iter 개(0 이면 combat_pool 크기만큼)를 '만났을 때 사망률' 에 비례해 뽑는다. 사망률은 학습 중 GRPO 시행의
     결과로 (조우, 막) 마다 지수이동평균을 낸다 (처음엔 모두 0.5). 잘 지는 적과 더 많이 싸운다.
 - GRPO 그룹: 같은 시나리오·같은 시드로 G 번 싸운다. 셔플과 적 난수가 같으므로 시행끼리의 차이는
   정책의 선택에서만 나온다.
@@ -47,7 +47,7 @@ CHECKPOINT = "combat_checkpoint.pt"
 class CombatConfig:
     iterations: int = 200
     rounds_per_iter: int = 1  # 고루: 반복마다 combat_pool 을 몇 바퀴 돌지 (토이: 한 바퀴 = 조우 6 × 막 3 = 18)
-    focus_per_iter: int = 18  # 집중: 사망률에 비례해 더 뽑을 시나리오 수
+    focus_per_iter: int = 0  # 집중: 사망률에 비례해 더 뽑을 시나리오 수. 0 이면 combat_pool 크기만큼
     focus_power: float = 1.0  # 뽑을 확률 ∝ max(사망률, focus_floor) ** focus_power. 크면 더 치우친다
     focus_floor: float = 0.05  # 사망률이 0 이 된 적도 가끔은 집중 쪽에서 뽑히게
     death_rate_ema: float = 0.3  # 사망률 지수이동평균의 새 값 비중
@@ -109,9 +109,10 @@ def scenarios_for_round(env, rng: np.random.Generator, cfg: CombatConfig) -> lis
 def plan_iteration(n_pool: int, death: np.ndarray, rng: np.random.Generator, cfg: CombatConfig) -> list[int]:
     """이번 반복에 싸울 combat_pool 인덱스들. 고루(전부 rounds_per_iter 번) + 집중(사망률 비례)."""
     idx = [int(i) for _ in range(cfg.rounds_per_iter) for i in rng.permutation(n_pool)]
-    if cfg.focus_per_iter > 0:
+    n_focus = cfg.focus_per_iter or n_pool
+    if n_focus > 0:
         w = np.maximum(death, cfg.focus_floor) ** cfg.focus_power
-        idx += [int(i) for i in rng.choice(n_pool, size=cfg.focus_per_iter, p=w / w.sum())]
+        idx += [int(i) for i in rng.choice(n_pool, size=n_focus, p=w / w.sum())]
     return idx
 
 
@@ -201,17 +202,24 @@ def _summary(groups: list[list[Trajectory]], scenarios: list[Scenario], prefix: 
     return out
 
 
-def _per_encounter(groups, scenarios) -> dict[str, float]:
+def encounter_label(env, encounter: int, act: int) -> str:
+    """로그용 이름. 환경이 이름을 알려 주면 그 이름, 아니면 '조우@막'."""
+    if hasattr(env, "encounter_name"):
+        return env.encounter_name(encounter)
+    return f"{encounter}@{act}"
+
+
+def _per_encounter(env, groups, scenarios) -> dict[str, float]:
     by: dict[str, list[bool]] = {}
     for g, sc in zip(groups, scenarios):
-        by.setdefault(f"{sc.encounter}@{sc.act}", []).extend(t.won for t in g)
+        by.setdefault(encounter_label(env, sc.encounter, sc.act), []).extend(t.won for t in g)
     return {k: float(np.mean(v)) for k, v in sorted(by.items())}
 
 
 def evaluate_policy(policy: CombatPolicy, env, scenarios: list[Scenario], cfg: CombatConfig) -> dict:
     groups = drive(policy, [group_steps(env, sc, cfg, greedy=True) for sc in scenarios])
     out = _summary(groups, scenarios, "eval_")
-    out["eval_by_encounter"] = _per_encounter(groups, scenarios)
+    out["eval_by_encounter"] = _per_encounter(env, groups, scenarios)
     return out
 
 
@@ -247,7 +255,7 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
             torch.cuda.set_rng_state_all(ck["rng"]["cuda"])
         log(f"resume: {ckpt_path} 에서 반복 {start} 부터 이어서 학습합니다 (목표 {cfg.iterations})")
     (out / "combat_config.json").write_text(json.dumps(asdict(cfg), indent=2))
-    log(f"device={device} 시나리오/반복={cfg.rounds_per_iter * len(pool)}(고루)+{cfg.focus_per_iter}(집중) "
+    log(f"device={device} 시나리오/반복={cfg.rounds_per_iter * len(pool)}(고루)+{cfg.focus_per_iter or len(pool)}(집중) "
         f"group={cfg.group_size}")
     for it in range(start, cfg.iterations):
         t0 = time.time()
@@ -260,7 +268,7 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
             policy.eval()
             row.update(evaluate_policy(policy, env, eval_set, cfg))
             policy.train()
-        row["death_rate"] = {f"{e}@{a}": round(float(d), 3) for (e, a), d in zip(pool, death)}
+        row["death_rate"] = {encounter_label(env, e, a): round(float(d), 3) for (e, a), d in zip(pool, death)}
         row["sec"] = round(time.time() - t0, 1)
         history.append(row)
         log(" ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()

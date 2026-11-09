@@ -49,6 +49,7 @@ Slay the Spire 2를 플레이하는 AI의 구조 실험입니다.
 | `sts2ai/train/combat_train.py` | 전투만 따로 학습 (무작위 덱·HP·포션, 같은 시드 GRPO) |
 | `sts2ai/envs/toy.py` | 검증용 토이 게임 |
 | `sts2ai/envs/sts2_adapter.py` | r33hab/sts2 어댑터 (**실행 검증 전**) |
+| `sts2ai/envs/zhiyue_adapter.py` | zhiyue/sts2-rl-agent 어댑터: 실제 StS2 전투로 전투 에이전트만 따로 학습 |
 
 ## 평가 에이전트
 
@@ -114,7 +115,31 @@ critic(가치망) 없이 그룹 평균이 기준선 역할을 하는 것이 GRPO
 - 전투만 따로 학습한 정책은 RUN 토큰을 본 적이 없으므로 넣지 않습니다. 이 설정은 `agent.pt`에 같이 저장되어 `scripts/evaluate.py`에서도 유지됩니다.
 - `--init-policy` 없이 고정하려고 하면 에러가 납니다. 예전처럼 런 안에서 전투 정책도 같이 학습하려면 `--no-freeze-policy`를 주세요.
 
-실제 시뮬레이터는 임의의 덱, HP, 포션으로 전투를 시작하는 API(`make_combat`)를 아직 확인하지 못해서 토이에서만 됩니다.
+#### 실제 StS2 전투로 학습 (zhiyue/sts2-rl-agent)
+
+[zhiyue/sts2-rl-agent](https://github.com/zhiyue/sts2-rl-agent)는 StS2 전투를 순수 Python으로 다시 구현한 시뮬레이터입니다. 이 저장소에는 그 코드를 넣지 않고, 따로 받아 둔 체크아웃을 경로로 불러 씁니다. 그 저장소에는 라이선스 파일이 없고, 게임을 디컴파일한 소스(`decompiled/`)가 들어 있기 때문입니다. 쓸지는 각자 판단하세요.
+
+```bash
+git clone https://github.com/zhiyue/sts2-rl-agent ../sts2-rl-agent && uv pip install gymnasium
+```
+```bash
+.venv/bin/python scripts/train_combat.py --env zhiyue --zhiyue-path ../sts2-rl-agent --out-dir runs/combat_sts2
+```
+```bash
+ZHIYUE_PATH=../sts2-rl-agent .venv/bin/python -m pytest -q tests   # 어댑터 테스트 (경로가 없으면 건너뜀)
+```
+
+- **대상:** 아이언클래드, 카드 풀 87장, 포션 64종, 1~4막 조우 80개(약한/일반/엘리트/보스), 몬스터 121종. 포식이나 포션 슬롯 9칸 같은 실제 메커니즘이 그대로 들어옵니다.
+- **관측:** 그 시뮬레이터의 전투 상태를 우리 토큰으로 바꿉니다. 손패, 턴 종료, 포션 칸, 더미 3개, 플레이어·적 파워, 적과 의도(한 행동에 여러 개면 전부)가 들어갑니다. 카드 효과로 선택 화면이 뜨면 선택지 카드와 확인/건너뛰기 토큰이 행동이 됩니다(최대 31개).
+- **합법 행동:** 그 시뮬레이터의 `get_action_mask`를 그대로 옮깁니다. 무작위 타깃이나 아군 타깃처럼 우리가 타깃을 고르지 않는 행동은 합법인 첫 타깃으로 보냅니다.
+- **확인한 것:** 조우 80개 전부에서 무작위 시나리오와 무작위 행동으로 에러가 없습니다. 같은 시드의 전투를 번갈아 진행해도 똑같이 흘러갑니다(나란히 진행하는 GRPO 그룹의 전제). 포식으로 최대 HP가 오릅니다. 포션 9칸이 됩니다. 시뮬레이터만 돌리면 무작위 행동 기준 초당 약 160 전투(2,500 스텝)입니다.
+- **그 시뮬레이터의 특이점:**
+  - 카드 메타데이터를 그 저장소의 `docs/`와 `decompiled/`에서 현재 폴더 기준 경로로 읽습니다. 그래서 어댑터가 초기화할 때 그 폴더로 들어가 캐시를 한 번 채웁니다.
+  - import 순서에 따라 순환 import 에러가 나서, `gym_env.combat_env`를 먼저 import합니다.
+- **한계:**
+  - 아이언클래드만 연결했고, 유물은 넣지 않습니다.
+  - 정확도는 그 저장소의 주장이고, 이 저장소에서는 실제 게임과 대조하지 않았습니다.
+  - 토이에서 학습한 체크포인트와는 어휘 크기가 달라서 호환되지 않습니다.
 
 ## 실행
 
