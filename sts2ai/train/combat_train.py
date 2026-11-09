@@ -14,8 +14,9 @@
   정책의 선택에서만 나온다.
 
 점수 (클수록 좋음, 이긴 시행은 항상 진 시행보다 높다)
-- 이김: 2 + clip(q / 125, -1, 1),  q = ΔHP − potion_cost_hp·쓴 포션 수 + max_hp_weight·Δ최대HP
-        → HP 를 덜 잃을수록, 포션을 덜 쓸수록, 최대 HP 가 오를수록 높다. 범위 [1, 3].
+- 이김: 2 + clip(q / 125, -1, 1),  q = ΔHP + max_hp_weight·Δ최대HP − potion_cost_hp·쓴 포션 수
+        → HP 를 덜 잃을수록, 최대 HP 가 오를수록 높다. 범위 [1, 3].
+        포션은 기본으로 마음껏 쓴다 (potion_cost_hp = 0). 아껴 쓰게 하려면 0 보다 크게.
 - 짐  : −1 + (적에게 준 피해 비율)   (loss_ranking=False 면 −1 고정). 범위 [−1, 0].
 그룹 안에서 z-score 로 이점을 매기는 것은 런 학습의 GRPO 와 같다 (grpo.advantages, grpo_update).
 
@@ -59,7 +60,7 @@ class CombatConfig:
     max_hp_min: int = 1
     max_hp_max: int = 125
     hp_min: int = 1  # HP 는 [hp_min, 최대 HP] 에서 뽑는다
-    potion_cost_hp: float = 10.0  # 포션 1개를 HP 몇과 같게 볼지
+    potion_cost_hp: float = 0.0  # 포션 1개를 HP 몇과 같게 볼지. 0 = 포션은 마음껏 (쓴다고 점수가 깎이지 않음)
     max_hp_weight: float = 1.0  # 최대 HP 1 을 HP 몇과 같게 볼지
     loss_ranking: bool = True  # 진 시행끼리는 적에게 준 피해가 큰 쪽을 높게
     advantage_mode: str = "zscore"

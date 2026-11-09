@@ -306,16 +306,18 @@ def test_drive_batches_runs_and_forks_together():
 # ---- 전투만 따로 학습 ----
 
 def test_combat_score_order():
-    """이기면 무조건 진 것보다 높고, HP 를 덜 잃을수록·포션을 덜 쓸수록·최대 HP 가 오를수록 높다."""
+    """이기면 무조건 진 것보다 높고, HP 를 덜 잃을수록·최대 HP 가 오를수록 높다. 포션은 기본으로 공짜."""
     from sts2ai.train.combat_train import CombatConfig, combat_score
 
-    cfg = CombatConfig()
+    assert combat_score(True, 50, 40, 60, 60, 9, 1.0, CombatConfig()) == \
+        combat_score(True, 50, 40, 60, 60, 0, 1.0, CombatConfig())  # 기본: 포션을 써도 점수 그대로
+    cfg = CombatConfig(potion_cost_hp=10.0)
     worst_win = combat_score(True, 125, 1, 125, 125, 9, 1.0, cfg)
     best_loss = combat_score(False, 125, 0, 125, 125, 0, 1.0, cfg)
     assert worst_win > best_loss
     base = combat_score(True, 50, 40, 60, 60, 1, 1.0, cfg)
     assert combat_score(True, 50, 45, 60, 60, 1, 1.0, cfg) > base  # HP 덜 잃음
-    assert combat_score(True, 50, 40, 60, 60, 0, 1.0, cfg) > base  # 포션 덜 씀
+    assert combat_score(True, 50, 40, 60, 60, 0, 1.0, cfg) > base  # 포션 비용을 주면 덜 쓴 쪽이 높다
     assert combat_score(True, 50, 40, 60, 63, 1, 1.0, cfg) > base  # 최대 HP 상승
     assert combat_score(False, 50, 0, 60, 60, 0, 0.8, cfg) > combat_score(False, 50, 0, 60, 60, 0, 0.2, cfg)
     cfg.loss_ranking = False
