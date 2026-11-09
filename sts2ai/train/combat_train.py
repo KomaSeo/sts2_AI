@@ -60,6 +60,10 @@ class CombatConfig:
     max_hp_min: int = 1
     max_hp_max: int = 125
     hp_min: int = 1  # HP 는 [hp_min, 최대 HP] 에서 뽑는다
+    # 유물 개수 [relics_min, relics_max]. env.relic_pool() 에서 겹치지 않게 뽑는다 (풀보다 많으면 풀 전부).
+    relics_min: int = 0
+    relics_max: int = 0
+    init_policy: str = ""  # 처음 시작할 때 불러올 전투 정책 가중치 (combat_policy.pt). 이어서 학습할 때는 무시
     potion_cost_hp: float = 0.0  # 포션 1개를 HP 몇과 같게 볼지. 0 = 포션은 마음껏 (쓴다고 점수가 깎이지 않음)
     max_hp_weight: float = 1.0  # 최대 HP 1 을 HP 몇과 같게 볼지
     loss_ranking: bool = True  # 진 시행끼리는 적에게 준 피해가 큰 쪽을 높게
@@ -96,7 +100,13 @@ def sample_scenario(env, rng: np.random.Generator, cfg: CombatConfig, encounter:
     potions = [int(rng.choice(pots)) for _ in range(n_pot)]
     max_hp = int(rng.integers(max(1, cfg.max_hp_min), cfg.max_hp_max + 1))
     hp = int(rng.integers(min(max(1, cfg.hp_min), max_hp), max_hp + 1))
-    return Scenario(encounter, act, deck, hp, max_hp, potions, int(rng.integers(2**31)))
+    seed = int(rng.integers(2**31))
+    relics: list[int] = []
+    if cfg.relics_max > 0 and hasattr(env, "relic_pool"):  # 유물을 안 쓰면 난수를 더 쓰지 않는다 (예전 결과 유지)
+        rp = env.relic_pool()
+        n = min(int(rng.integers(cfg.relics_min, cfg.relics_max + 1)), len(rp))
+        relics = sorted(int(r) for r in rng.choice(rp, size=n, replace=False))
+    return Scenario(encounter, act, deck, hp, max_hp, potions, seed, relics)
 
 
 def scenarios_for_round(env, rng: np.random.Generator, cfg: CombatConfig) -> list[Scenario]:
@@ -196,6 +206,7 @@ def _summary(groups: list[list[Trajectory]], scenarios: list[Scenario], prefix: 
         f"{prefix}score": float(np.mean([t.score for t in trajs])),
         f"{prefix}hp_lost_on_win": float(np.mean(hp_lost)) if hp_lost else float("nan"),
         f"{prefix}potions_used": float(np.mean([t.info["potions_used"] for t in trajs])),
+        f"{prefix}relics": float(np.mean([len(sc.relics) for sc in scenarios])),
     }
     if wins:
         out[f"{prefix}win_steps"] = float(np.mean([len(t.actions) for t in wins]))
@@ -254,6 +265,9 @@ def train_combat(env, cfg: CombatConfig, log=print, resume: bool = False) -> Com
         if device.type == "cuda" and ck["rng"].get("cuda") is not None:
             torch.cuda.set_rng_state_all(ck["rng"]["cuda"])
         log(f"resume: {ckpt_path} 에서 반복 {start} 부터 이어서 학습합니다 (목표 {cfg.iterations})")
+    if start == 0 and cfg.init_policy:
+        policy.load_state_dict(torch.load(cfg.init_policy, map_location="cpu"))
+        log(f"init_policy: {cfg.init_policy} 에서 시작합니다")
     (out / "combat_config.json").write_text(json.dumps(asdict(cfg), indent=2))
     log(f"device={device} 시나리오/반복={cfg.rounds_per_iter * len(pool)}(고루)+{cfg.focus_per_iter or len(pool)}(집중) "
         f"group={cfg.group_size}")

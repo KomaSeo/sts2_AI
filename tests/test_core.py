@@ -455,3 +455,15 @@ def test_freeze_requires_a_trained_policy(tmp_path):
     cfg.freeze_policy = True
     with pytest.raises(ValueError, match="init-policy"):
         train(ToyRun(), cfg, log=lambda *_: None)
+
+
+def test_relic_sampling_is_off_by_default_and_capped_by_pool():
+    from sts2ai.train.combat_train import CombatConfig, sample_scenario
+
+    env = ToyRun()
+    a = sample_scenario(env, np.random.default_rng(0), CombatConfig(), 1, 0)
+    assert a.relics == []
+    b = sample_scenario(env, np.random.default_rng(0), CombatConfig(relics_min=0, relics_max=40), 1, 0)
+    assert (a.deck, a.hp, a.potions, a.seed) == (b.deck, b.hp, b.potions, b.seed)  # 유물만 더해진다
+    many = [sample_scenario(env, np.random.default_rng(s), CombatConfig(relics_min=10, relics_max=40), 1, 0) for s in range(20)]
+    assert all(sorted(sc.relics) == sorted(env.relic_pool()) for sc in many)  # 토이 풀은 4개뿐

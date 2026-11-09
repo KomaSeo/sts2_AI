@@ -65,6 +65,7 @@ class _Sim:
             from sts2_env.gym_env.action_space import get_action_mask
             from sts2_env.potions.base import all_potion_models, create_potion
             from sts2_env.relics.base import RelicId
+            from sts2_env.relics.registry import RELIC_REGISTRY, create_relic, load_all_relics
 
             for cid in CardId:  # 카드 메타데이터 캐시 채우기 (docs/, decompiled/ 를 상대 경로로 읽는다)
                 for up in (False, True):
@@ -73,6 +74,7 @@ class _Sim:
         self.C, self.CombatState, self.Rng = C, CombatState, Rng
         self.create_card, self.create_potion, self.get_action_mask = create_card, create_potion, get_action_mask
         self.TargetType = TargetType
+        self.create_relic = create_relic
 
         self.card_ids = {cid: i + 1 for i, cid in enumerate(CardId)}
         self.cards_by_id = {i: cid for cid, i in self.card_ids.items()}
@@ -100,6 +102,12 @@ class _Sim:
                 for setup in getattr(mod, kind, []):
                     self.encounters.append((getattr(setup, "__name__", str(setup)), act, setup))
         self.ironclad_pool = [self.card_ids[c] for c in IRONCLAD_CARD_POOL]
+        # 아이언클래드 런에서 얻을 수 있는 유물: 공용 + 아이언클래드 전용 + 이벤트·고대 유물.
+        # 다른 캐릭터 전용, 폐기(DEPRECATED), 대체용(FALLBACK), 다른 캐릭터 시작 유물은 뺀다.
+        load_all_relics()
+        self.relics_by_id = {self.relic_ids[rid]: rid for rid, cls in RELIC_REGISTRY.items()
+                             if cls.pool.name in ("SHARED", "IRONCLAD")
+                             or (cls.pool.name == "EVENT" and cls.rarity.name in ("EVENT", "ANCIENT"))}
         self.vocab = Vocab(
             n_cards=len(self.card_ids) + 1,
             n_relics=len(self.relic_ids) + 1,
@@ -281,6 +289,8 @@ class ZhiyueCombatSim:
             lines.append(f"  적 {self._enemy(e)}: HP {e.current_hp}/{e.max_hp}  방어도 {e.block}  의도 {' + '.join(intents) or '-'}"
                          + (f"  [{self._powers(e)}]" if e.powers else ""))
         lines.append("  손패: " + ", ".join(self._card(x) for x in c.hand))
+        if c.relics:
+            lines.append(f"  유물 {len(c.relics)}개")
         pots = [p_.potion_id.lower() for p_ in c.potions if p_ is not None]
         if pots:
             lines.append("  포션: " + ", ".join(pots))
@@ -391,15 +401,20 @@ class ZhiyueCombatEnv:
     def potion_pool(self) -> list[int]:
         return sorted(self.s.potions_by_id)
 
+    def relic_pool(self) -> list[int]:
+        return sorted(self.s.relics_by_id)
+
+    def relic_name(self, relic: int) -> str:
+        return self.s.relics_by_id[relic].name.lower()
+
     def make_combat(self, encounter: int, act: int, deck: list[tuple[int, bool]], hp: int, max_hp: int,
                     potions: list[int], relics: list[int], seed: int) -> ZhiyueCombatSim:
         s = self.s
-        if relics:
-            raise NotImplementedError("유물은 아직 연결하지 않았습니다")
         cards = [s.create_card(s.cards_by_id[cid], upgraded=up) for cid, up in deck]
         pots = [s.create_potion(s.potions_by_id[pid], slot=i) for i, pid in enumerate(potions)]
         combat = s.CombatState(player_hp=hp, player_max_hp=max_hp, deck=cards, rng_seed=seed,
-                               character_id="Ironclad", potions=pots, max_potion_slots=max(3, len(pots)))
+                               character_id="Ironclad", potions=pots, max_potion_slots=max(3, len(pots)),
+                               relics=[s.create_relic(s.relics_by_id[r]) for r in relics])
         _, _, setup = s.encounters[encounter - 1]
         setup(combat, s.Rng(seed))
         combat.start_combat()

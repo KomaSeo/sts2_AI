@@ -502,6 +502,10 @@ class ToyRun:
     def potion_pool(self) -> list[int]:
         return [P_FIRE, P_BLOCK, P_STRENGTH]
 
+    def relic_pool(self) -> list[int]:
+        """전투에 효과가 있는 토이 유물 (강화 유물은 주울 때만 효과라 뺀다)."""
+        return [R_BURNING, R_VAJRA, R_ANCHOR, R_LANTERN]
+
     def make_combat(self, encounter: int, act: int, deck: list[tuple[int, bool]], hp: int, max_hp: int,
                     potions: list[int], relics: list[int], seed: int) -> ToyCombatSim:
         """임의의 덱·HP·포션으로 시작하는 전투. 같은 인자와 seed 면 같은 전투(셔플·적 HP·적 난수)."""

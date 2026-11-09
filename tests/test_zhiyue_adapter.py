@@ -113,3 +113,35 @@ def test_descriptions_cover_a_whole_combat(env):
             sim.step(a, t)
             if not sim.done:
                 sim.describe_change(before, sim.snapshot())
+
+
+def test_relics_take_effect(env):
+    """유물이 실제로 작동한다: 닻(첫 턴 방어도), 바즈라(힘)."""
+    rid = {env.relic_name(r): r for r in env.relic_pool()}
+    assert len(rid) >= 250 and "burning_blood" in rid
+    enc, act = env.combat_pool()[0]
+    deck = [(env.card_pool()[0], False)] * 10
+    base = env.make_combat(enc, act, deck, 50, 50, [], [], 0)
+    anchor = env.make_combat(enc, act, deck, 50, 50, [], [rid["anchor"]], 0)
+    vajra = env.make_combat(enc, act, deck, 50, 50, [], [rid["vajra"]], 0)
+    assert anchor.c.player.block > base.c.player.block
+    strength = lambda sim: sum(pw.amount for pid, pw in sim.c.player.powers.items() if pid.name == "STRENGTH")
+    assert strength(vajra) > strength(base)
+    o = anchor.observe()
+    assert (o.types == 14).sum() == 1 and o.ids[o.types == 14][0] == env.s.relic_ids[env.s.relics_by_id[rid["anchor"]]]
+
+
+def test_forty_relic_scenarios_play_through(env):
+    from sts2ai.train.combat_train import CombatConfig, sample_scenario
+
+    cfg = CombatConfig(relics_min=0, relics_max=40)
+    rng = np.random.default_rng(5)
+    counts = []
+    for k, (enc, act) in enumerate(env.combat_pool()[::4]):
+        sc = sample_scenario(env, rng, cfg, enc, act)
+        assert len(sc.relics) == len(set(sc.relics)) <= 40
+        counts.append(len(sc.relics))
+        sim = env.make_combat(sc.encounter, sc.act, sc.deck, sc.hp, sc.max_hp, sc.potions, sc.relics, sc.seed)
+        assert len(sim.c.relics) == len(sc.relics)
+        _play_random(sim, np.random.default_rng(k))
+    assert min(counts) < 15 and max(counts) > 25

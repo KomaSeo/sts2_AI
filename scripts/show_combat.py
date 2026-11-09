@@ -35,6 +35,7 @@ def main() -> None:
     p.add_argument("--hp", type=int, default=0)
     p.add_argument("--max-hp", type=int, default=0)
     p.add_argument("--potions", type=int, default=-1, help="-1 이면 무작위")
+    p.add_argument("--relics", type=int, default=0, help="무작위 유물 개수")
     p.add_argument("--sample", action="store_true", help="greedy 대신 정책 확률대로 뽑기")
     p.add_argument("--max-steps", type=int, default=300)
     args = p.parse_args()
@@ -63,6 +64,7 @@ def main() -> None:
         cfg.deck_min = cfg.deck_max = args.deck_size
     if args.potions >= 0:
         cfg.potions_min = cfg.potions_max = args.potions
+    cfg.relics_min = cfg.relics_max = args.relics
     sc = sample_scenario(env, rng, cfg, enc, act)
     if args.max_hp:
         sc.max_hp = args.max_hp
@@ -73,6 +75,8 @@ def main() -> None:
     names = sorted(env.s.cards_by_id[cid].name.lower() + ("+" if up else "") for cid, up in sc.deck)
     print(f"=== {env.encounter_name(enc)} | 덱 {len(sc.deck)}장 | HP {sc.hp}/{sc.max_hp} | 포션 {len(sc.potions)}개 | seed {sc.seed}")
     print("덱: " + ", ".join(names))
+    if sc.relics:
+        print("유물: " + ", ".join(sorted(env.relic_name(r) for r in sc.relics)))
     turn, steps = -1, 0
     while not sim.done and steps < args.max_steps:
         o = sim.observe()

@@ -220,9 +220,15 @@ def _atomic_write_text(text: str, path: Path) -> None:
     os.replace(tmp, path)
 
 
-def _check_resume_config(saved: dict, cfg: Config) -> None:
+def _check_resume_config(saved: dict, cfg) -> None:
+    """예전 체크포인트에 없는 설정은 그 필드의 기본값이었다고 본다 (설정을 새로 추가해도 이어서 학습 가능)."""
+    from dataclasses import MISSING, fields
+
     now = asdict(cfg)
-    diff = {k: (saved.get(k), v) for k, v in now.items() if k not in RESUMABLE_CHANGES and saved.get(k) != v}
+    defaults = {f.name: f.default for f in fields(cfg) if f.default is not MISSING}
+    RESUMABLE = RESUMABLE_CHANGES | {"init_policy"}
+    diff = {k: (saved.get(k, defaults.get(k)), v) for k, v in now.items()
+            if k not in RESUMABLE and saved.get(k, defaults.get(k)) != v}
     if diff:
         lines = ", ".join(f"{k}: {a!r} -> {b!r}" for k, (a, b) in diff.items())
         raise ValueError(f"체크포인트와 설정이 다릅니다 ({lines}). 다른 --out-dir 를 쓰거나 설정을 맞추세요.")
