@@ -254,6 +254,87 @@ class ZhiyueCombatSim:
             enemy_alive=np.ones(len(enemy_tokens), dtype=bool),
         )
 
+    # ---- 사람이 읽는 설명 (scripts/show_combat.py) ----
+    @staticmethod
+    def _card(card) -> str:
+        return card.card_id.name.lower().removesuffix("_card") + ("+" if card.upgraded else "")
+
+    def _enemy(self, e) -> str:
+        return (e.monster_id or "?").lower()
+
+    def _powers(self, cr) -> str:
+        return ", ".join(f"{pid.name.lower()} {pw.amount}" for pid, pw in cr.powers.items())
+
+    def describe_state(self) -> str:
+        c, p = self.c, self.c.player
+        lines = [f"플레이어 HP {p.current_hp}/{p.max_hp}  방어도 {p.block}  에너지 {c.energy}"
+                 + (f"  [{self._powers(p)}]" if p.powers else "")]
+        for e in c.enemies:
+            if not e.is_alive:
+                continue
+            ai = c.enemy_ais.get(e.combat_id)
+            intents = []
+            if ai is not None and ai.current_move is not None:
+                for it in ai.current_move.intents:
+                    t = it.intent_type.name.lower()
+                    intents.append(f"{t} {it.damage}x{it.hits}" if it.damage else t)
+            lines.append(f"  적 {self._enemy(e)}: HP {e.current_hp}/{e.max_hp}  방어도 {e.block}  의도 {' + '.join(intents) or '-'}"
+                         + (f"  [{self._powers(e)}]" if e.powers else ""))
+        lines.append("  손패: " + ", ".join(self._card(x) for x in c.hand))
+        pots = [p_.potion_id.lower() for p_ in c.potions if p_ is not None]
+        if pots:
+            lines.append("  포션: " + ", ".join(pots))
+        return "\n".join(lines)
+
+    def describe_action(self, action: int, target_slot: int = -1) -> str:
+        """observe() 직후, step() 전에 부른다."""
+        c, C = self.c, self.s.C
+        a = self._their_action(action, target_slot)
+        tgt = ""
+        if c.pending_choice is not None:
+            if a == C.ACTION_END_TURN:
+                return "선택 확인/건너뛰기"
+            prompt = (c.pending_choice.prompt or "").strip()
+            return f"선택{f'({prompt})' if prompt else ''}: {self._card(c.pending_choice.options[a - 1].card)}"
+        if a == C.ACTION_END_TURN:
+            return "턴 종료"
+        if a >= C.POTION_ACTION_START:
+            slot, t = divmod(a - C.POTION_ACTION_START, C.POTION_TARGET_OPTIONS)
+            if t:
+                tgt = f" → {self._enemy(c.enemies[t - 1])}"
+            return f"포션 {c.potions[slot].potion_id.lower()}{tgt}"
+        if a <= C.MAX_HAND_SIZE:
+            return f"{self._card(c.hand[a - 1])}"
+        hand_idx, enemy = divmod(a - 1 - C.MAX_HAND_SIZE, C.MAX_ENEMIES)
+        return f"{self._card(c.hand[hand_idx])} → {self._enemy(c.enemies[enemy])}"
+
+    def snapshot(self) -> dict:
+        """행동 전후 비교용 수치."""
+        p = self.c.player
+        return {"hp": p.current_hp, "block": p.block, "max_hp": p.max_hp,
+                "enemies": {e.combat_id: (self._enemy(e), max(0, e.current_hp), e.block) for e in self.c.enemies}}
+
+    @staticmethod
+    def describe_change(before: dict, after: dict) -> str:
+        out = []
+        for key, label in (("hp", "HP"), ("block", "방어도"), ("max_hp", "최대 HP")):
+            if before[key] != after[key]:
+                out.append(f"{label} {before[key]}→{after[key]}")
+        for cid, (name, hp, blk) in after["enemies"].items():
+            if cid not in before["enemies"]:
+                out.append(f"{name} 등장(HP {hp})")
+                continue
+            _, hp0, blk0 = before["enemies"][cid]
+            if hp0 != hp:
+                out.append(f"{name} HP {hp0}→{hp}" + (" (처치)" if hp == 0 else ""))
+            elif blk0 != blk:
+                out.append(f"{name} 방어도 {blk0}→{blk}")
+        return ", ".join(out)
+
+    @property
+    def turn(self) -> int:
+        return int(self.c.turn_count)
+
     # ---- 행동 ----
     def _their_action(self, action: int, target_slot: int) -> int:
         plain, tgt = self._actions[action]

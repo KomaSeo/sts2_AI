@@ -95,3 +95,21 @@ def test_combat_training_runs_on_real_encounters(env, tmp_path):
     hist = __import__("json").loads((tmp_path / "combat_history.json").read_text())
     assert hist[0]["grpo_trajs"] > 0 and len(hist[0]["death_rate"]) == len(env.combat_pool())
     assert pol is not None
+
+
+def test_descriptions_cover_a_whole_combat(env):
+    """show_combat.py 가 쓰는 설명 함수가 선택 화면·포션·타깃까지 끝까지 동작한다."""
+    rng = np.random.default_rng(1)
+    for k, (enc, act) in enumerate(env.combat_pool()[::10]):
+        sc = _scenario(env, enc, act, k)
+        sim = env.make_combat(sc.encounter, sc.act, sc.deck, sc.hp, sc.max_hp, sc.potions, sc.relics, sc.seed)
+        while not sim.done:
+            o = sim.observe()
+            assert "플레이어 HP" in sim.describe_state()
+            a = int(rng.choice(np.flatnonzero(o.legal)))
+            t = int(o.enemy_slots[0]) if o.needs_target[a] and len(o.enemy_slots) else -1
+            assert sim.describe_action(a, t)
+            before = sim.snapshot()
+            sim.step(a, t)
+            if not sim.done:
+                sim.describe_change(before, sim.snapshot())
