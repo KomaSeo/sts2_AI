@@ -102,6 +102,10 @@ sudo systemctl daemon-reload && sudo systemctl enable --now sts2-sweep
 - 실패한 실험은 `runs/size_lr/<이름>/FAILED`가 남고, 다시 돌려도 건너뜁니다. 원인을 고친 뒤 그 파일을 지우면 다시 돕니다.
 - 다른 계획을 돌리려면 서비스 파일의 `--plan`과 `--runs-dir`를 바꾸고 `sudo systemctl daemon-reload && sudo systemctl restart sts2-sweep`.
 
+### 접속 주소 고정 (선택)
+
+서버가 중지됐다 켜지면(학습 종료, 스팟 회수) 퍼블릭 IP가 바뀝니다. 매번 SSH 설정을 고치기 싫으면 탄력적 IP를 씁니다. EC2 → 탄력적 IP → 할당 → 작업 → 탄력적 IP 주소 연결 → 이 인스턴스. 공인 IPv4 요금(시간당 $0.005)은 서버가 꺼져 있어도 나오니, 다 끝나면 8단계에서 릴리스합니다.
+
 ## 7. 지켜보기와 결과 받기
 
 ```bash
@@ -118,7 +122,8 @@ scp -i my-key.pem -r ubuntu@<IP>:sts2_AI/runs/size_lr ./
 
 순서가 중요합니다.
 
-1. **스팟 요청을 취소합니다.** EC2 → Spot Requests → 해당 요청 → Cancel. 영구 요청을 남겨 두면 인스턴스를 지워도 새로 띄울 수 있습니다.
-2. **인스턴스를 종료(Terminate)합니다.**
-3. **볼륨과 스냅샷을 지웁니다.** EC2 → Volumes, Snapshots에서 남은 것이 없는지 확인합니다. 꺼진 서버도 디스크 요금은 계속 나옵니다(gp3 기준 대략 GB당 월 $0.08).
-4. 다음 날 Billing에서 요금이 멈췄는지 확인합니다.
+1. **탄력적 IP를 썼다면 연결 해제하고 릴리스합니다.** EC2 → 탄력적 IP → 작업 → 연결 해제, 그다음 릴리스. 서버가 꺼져 있어도 IP 요금(약 월 $3.6)이 계속 나옵니다.
+2. **스팟 요청을 취소합니다.** EC2 → Spot Requests → 해당 요청 → Cancel. 영구 요청을 남겨 두면 인스턴스를 지워도 새로 띄울 수 있습니다.
+3. **인스턴스를 종료(Terminate)합니다.**
+4. **볼륨과 스냅샷을 지웁니다.** EC2 → Volumes, Snapshots에서 남은 것이 없는지 확인합니다. 꺼진 서버도 디스크 요금은 계속 나옵니다(gp3 기준 대략 GB당 월 $0.08).
+5. 다음 날 Billing에서 요금이 멈췄는지 확인합니다.
