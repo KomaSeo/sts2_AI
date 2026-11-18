@@ -1067,5 +1067,5 @@
   - 확인
     - 저주 18 종을 각각 넣은 전투를 무작위 행동으로 돌렸다. 오류는 없었다.
     - 덱 장수 평균: 1 막 13.1, 2 막 18.2, 3 막 22.1. 저주 평균 약 3 장.
-  - 학습: runs/combat_only_v9 를 반복 23 근처에서 끊고 runs/combat_only_v10 에서 처음부터 다시 학습한다 (11M, 엔트로피 하한 0.3, 막 기준 유물, 막 기준 덱).
+  - 학습: runs/combat_only_v9 를 반복 11 에서 끊고 runs/combat_only_v10 에서 처음부터 다시 학습한다 (11M, 엔트로피 하한 0.3, 막 기준 유물, 막 기준 덱).
 - 관련 파일: sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py, tests/test_combat_only.py
