@@ -460,6 +460,13 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
                                                                  encoding="utf-8")
             (out / "fights" / f"iter_{it:04d}.txt").write_text("\n\n".join(fight_text(r) for r in recs),
                                                                 encoding="utf-8")
+            try:  # 보기 페이지(fights.html, 반복마다 .md)도 다시 쓴다. 실패해도 학습은 계속한다
+                from .fight_view import to_md, write_all  # noqa: PLC0415
+
+                (out / "fights" / f"iter_{it:04d}.md").write_text(to_md(it, recs), encoding="utf-8")
+                write_all(out)
+            except Exception as exc:  # noqa: BLE001
+                log(f"  fights.html 을 쓰지 못했다: {exc!r}")
             policy.train()
             row.update(grpo_update(policy, opt, [g for g in groups if len(g) > 1], epochs=cfg.grpo_epochs))
             runner.sync(policy)

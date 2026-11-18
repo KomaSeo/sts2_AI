@@ -820,3 +820,16 @@
     - 같은 풀을 쓰는 런 학습의 모의전·변환 후보에서도 빠진다. 혼자 하는 런에는 나오지 않는 카드라서 같이 뺐다. — [AI 임의 결정]
   - 학습: 카드 풀과 검증 전투가 바뀌어서 runs/combat_only_v2 를 반복 14 에서 끊었다. runs/combat_only_v3 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, scripts/fights_html.py
+
+### 2026-11-18 · 학습이 반복마다 fights.html 을 직접 다시 쓰기
+- 출처: [사용자 지시] / 방식은 [AI 임의 결정]
+- 사용자 원문: "그냥 로컬에서 돌려지면 아티팩트로 마번 publish할 필요는 없어"
+- 이유: 이유 미기재.
+- 내용
+  - 보기 코드를 sts2ai/train/fight_view.py 로 옮겼다. scripts/fights_html.py 는 그것을 부르기만 한다.
+  - 학습(combat_only.py)이 반복마다 fights/iter_NNNN.md 와 <폴더>/fights.html 을 다시 쓴다.
+    - 쓰다 실패해도 학습은 계속한다.
+    - fights.html 은 임시 파일에 쓴 뒤 바꿔 넣는다.
+  - 아티팩트는 더 올리지 않는다.
+  - runs/combat_only_v3 은 반복 3 에서 끊었다. checkpoint.pt 로 그대로 이어 달린다.
+- 관련 파일: sts2ai/train/fight_view.py, scripts/fights_html.py, sts2ai/train/combat_only.py
