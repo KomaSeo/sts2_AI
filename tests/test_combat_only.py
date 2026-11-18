@@ -103,3 +103,17 @@ def test_act_deck_sizes_and_curses():
             assert n_extra <= max(9 * act, 5)
             assert n_start + n_extra >= 5
             assert all(not up for c, up in sc.deck if c in (90, 91))
+
+
+def test_special_card_probability():
+    from sts2ai.train.combat_only import sample_scenario
+
+    cfg = CombatConfig(deck_scheme="acts", special_prob=0.25)
+    rng = np.random.default_rng(4)
+    got = []
+    for _ in range(2000):
+        sc = sample_scenario(rng, cfg, [1, 2, 3], [7], (5, 1, "Normal"), curses=[90], specials=[500, 501])
+        n = sum(c in (500, 501) for c, _ in sc.deck)
+        assert n <= 1
+        got.append(n)
+    assert abs(np.mean(got) - 0.25) < 0.03

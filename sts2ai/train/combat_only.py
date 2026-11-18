@@ -56,6 +56,8 @@ class CombatConfig:
     curses_min: int = 0
     curses_max: int = 6
     min_playable: int = 5  # "acts" 에서 저주 아닌 카드가 이보다 적으면 풀에서 채운다 (빈 덱 방지)
+    # 특수 카드(어느 카드 목록에도 없는 이벤트·고대 등급 카드) 1 장을 넣을 확률 ("acts" 에서만). 이벤트로 얻는 카드를 흉내 낸다
+    special_prob: float = 0.0
     # 포션 개수: "최소-최대:확률" 구간을 확률로 고른 뒤 구간 안에서 고르게. 쓸 수 있는 칸을 포션 수만큼 늘린다 (시뮬레이터 칸 9)
     potion_bands: str = "0-2:0.7,3-6:0.2,7-9:0.1"
     relics_min: int = 0
@@ -124,6 +126,19 @@ def card_pool(run) -> list[int]:
     return [c for c in run.probe_card_pool() if run.card_upgradable(c)]
 
 
+def special_pool(run) -> list[int]:
+    """시뮬레이터 카드 목록(CardPools.g.cs) 어디에도 없는 이벤트·고대 등급 카드 (멀티 전용 제외).
+    퀘스트 카드와 전투 중에 생기는 토큰 카드는 뺀다."""
+    import re  # noqa: PLC0415
+
+    text = (run.lib.repo / "src" / "Sts2Emulator" / "Generated" / "CardPools.g.cs").read_text(encoding="utf-8")
+    listed = {int(x) for b in re.findall(r"\w+ =>\s*\[([^\]]*)\]", text) for x in re.split(r"[,\s]+", b)
+              if x.strip()}
+    return sorted(c for c, info in run.lib.cards.items()
+                  if c not in listed and info.rarity in ("Event", "Ancient") and c not in run.lib.multiplayer_only
+                  and info.card_type not in ("Curse", "Status"))
+
+
 def curse_pool(run) -> list[int]:
     """저주 카드 (멀티 전용 제외). 상태이상은 넣지 않는다."""
     return sorted(c for c in run.probe_card_pool()
@@ -184,7 +199,7 @@ def sample_act_relics(rng: np.random.Generator, act: int, relic_pool, ancients: 
 
 def sample_scenario(rng: np.random.Generator, cfg: CombatConfig, cards, pots, enc: tuple[int, int, str],
                     relic_pool=(), starters: list[tuple[int, int, int]] = (), ancients: dict | None = None,
-                    curses=()) -> Scenario:
+                    curses=(), specials=()) -> Scenario:
     """starters 를 주면 그 카드들을 먼저 넣고, 나머지는 cards 에서 starters 를 뺀 풀로 채운다."""
     ids = [cid for cid, lo, hi in starters for _ in range(int(rng.integers(lo, hi + 1)))]
     fill_pool = [c for c in cards if c not in {s[0] for s in starters}] if starters else list(cards)
@@ -194,6 +209,8 @@ def sample_scenario(rng: np.random.Generator, cfg: CombatConfig, cards, pots, en
         rest = int(rng.integers(0, cfg.extra_per_act * act + 1))
         rest = max(rest, cfg.min_playable - len(ids))
         ids += [int(c) for c in rng.choice(fill_pool, rest)] if rest > 0 else []
+        if len(specials) and rng.random() < getattr(cfg, "special_prob", 0.0):
+            ids.append(int(rng.choice(specials)))
         n_curse = int(rng.integers(cfg.curses_min, cfg.curses_max + 1))
         curse_ids = [int(c) for c in rng.choice(curses, n_curse)] if n_curse and len(curses) else []
     else:
@@ -503,6 +520,7 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
     pool = combat_pool(run)
     cards, pots, relic_pool = card_pool(run), potion_pool(run), run.relic_pool()
     curses = curse_pool(run)
+    specials = special_pool(run)
     starters = parse_starters(cfg.starter_cards, {info.name: cid for cid, info in run.lib.cards.items()})
     ancients = run.ancient_relic_pools() if cfg.relic_scheme == "acts" else None
     device = resolve_device(cfg.device)
@@ -514,7 +532,7 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
     log(f"device={device} workers={cfg.workers} 적(조우,막)={len(pool)} 카드풀={len(cards)} 포션풀={len(pots)} "
         f"유물풀={len(relic_pool)} 파라미터={sum(p.numel() for p in policy.parameters()):,}")
     eval_rng = np.random.default_rng(10**6 + cfg.seed)
-    eval_set = [sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool, starters, ancients, curses) for _ in range(cfg.eval_rounds) for e in pool]
+    eval_set = [sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool, starters, ancients, curses, specials) for _ in range(cfg.eval_rounds) for e in pool]
     death = np.full(len(pool), 0.5)
     history: list[dict] = []
     start = 0
@@ -572,7 +590,7 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
             if nf:
                 w = np.maximum(death, cfg.focus_floor)
                 idx += [int(i) for i in rng.choice(len(pool), nf, p=w / w.sum())]
-            scs = [sample_scenario(rng, cfg, cards, pots, pool[i], relic_pool, starters, ancients, curses) for i in idx]
+            scs = [sample_scenario(rng, cfg, cards, pots, pool[i], relic_pool, starters, ancients, curses, specials) for i in idx]
             a = actor()
             groups = runner.play(a, scs, False, rng)
             t_play = time.time() - t0

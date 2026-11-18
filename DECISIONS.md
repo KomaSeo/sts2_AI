@@ -1069,3 +1069,19 @@
     - 덱 장수 평균: 1 막 13.1, 2 막 18.2, 3 막 22.1. 저주 평균 약 3 장.
   - 학습: runs/combat_only_v9 를 반복 11 에서 끊고 runs/combat_only_v10 에서 처음부터 다시 학습한다 (11M, 엔트로피 하한 0.3, 막 기준 유물, 막 기준 덱).
 - 관련 파일: sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py, tests/test_combat_only.py
+
+### 2026-11-19 · 전투만 학습: 이벤트·고대 등급 특수 카드를 25% 확률로 1 장 (v11)
+- 출처: [AI 제안 → 사용자 승인] / 확률은 [AI 임의 결정]
+- 사용자 원문: "혹시 특수 중립 카드들도 포함되어 있나? 쪼기, 새 습격" / (덱마다 0~1 장 낮은 확률로 넣자는 제안에) "yes."
+- 이유: 이유 미기재.
+- 내용
+  - 확인한 것: 시뮬레이터 카드 목록(CardPools.g.cs) 어디에도 없는 카드가 40 장이고, 그동안 학습에서 빠져 있었다.
+    - 이벤트 19, 토큰 10, 고대 8, 퀘스트 3.
+    - 쪼기(Peck)와 섀 급습은 이벤트 등급이다.
+  - 특수 카드 풀(special_pool): 이 가운데 이벤트·고대 등급 27 장 (멀티 전용 제외).
+    - 토큰은 전투 중에 다른 카드가 만들어 이미 보인다. 퀘스트 카드는 전투용이 아니라서 뺐다.
+  - 덱마다 25% 확률로 특수 카드 1 장을 넣는다 (special_prob = 0.25, deck_scheme = "acts" 에서만).
+    - "0~1 장" 을 고르게 뽑으면 절반의 덱에 들어가서 "낮은 확률" 이 아니다. 그래서 25% 로 정했다. 강화 확률 20% 는 그대로 적용한다.
+  - 확인: 27 장 각각(강화 전·후)을 넣은 전투를 무작위 행동으로 돌렸다. 오류는 없었다. 확률 테스트를 넣었다.
+  - 학습: runs/combat_only_v10 을 반복 24 에서 끊고 runs/combat_only_v11 에서 처음부터 다시 학습한다.
+- 관련 파일: sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py, tests/test_combat_only.py
