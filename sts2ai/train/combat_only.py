@@ -58,6 +58,9 @@ class CombatConfig:
     min_playable: int = 5  # "acts" 에서 저주 아닌 카드가 이보다 적으면 풀에서 채운다 (빈 덱 방지)
     # 특수 카드(어느 카드 목록에도 없는 이벤트·고대 등급 카드) 1 장을 넣을 확률 ("acts" 에서만). 이벤트로 얻는 카드를 흉내 낸다
     special_prob: float = 0.0
+    # special_max > 0 이면 확률 대신 special_min~special_max 장을 고르게 (겹침 허용)
+    special_min: int = 0
+    special_max: int = 0
     # 포션 개수: "최소-최대:확률" 구간을 확률로 고른 뒤 구간 안에서 고르게. 쓸 수 있는 칸을 포션 수만큼 늘린다 (시뮬레이터 칸 9)
     potion_bands: str = "0-2:0.7,3-6:0.2,7-9:0.1"
     relics_min: int = 0
@@ -209,7 +212,10 @@ def sample_scenario(rng: np.random.Generator, cfg: CombatConfig, cards, pots, en
         rest = int(rng.integers(0, cfg.extra_per_act * act + 1))
         rest = max(rest, cfg.min_playable - len(ids))
         ids += [int(c) for c in rng.choice(fill_pool, rest)] if rest > 0 else []
-        if len(specials) and rng.random() < getattr(cfg, "special_prob", 0.0):
+        if len(specials) and getattr(cfg, "special_max", 0) > 0:
+            n_sp = int(rng.integers(cfg.special_min, cfg.special_max + 1))
+            ids += [int(c) for c in rng.choice(specials, n_sp)] if n_sp else []
+        elif len(specials) and rng.random() < getattr(cfg, "special_prob", 0.0):
             ids.append(int(rng.choice(specials)))
         n_curse = int(rng.integers(cfg.curses_min, cfg.curses_max + 1))
         curse_ids = [int(c) for c in rng.choice(curses, n_curse)] if n_curse and len(curses) else []

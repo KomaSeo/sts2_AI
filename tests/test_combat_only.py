@@ -117,3 +117,17 @@ def test_special_card_probability():
         assert n <= 1
         got.append(n)
     assert abs(np.mean(got) - 0.25) < 0.03
+
+
+def test_special_card_count_range():
+    from sts2ai.train.combat_only import sample_scenario
+
+    cfg = CombatConfig(deck_scheme="acts", special_max=5)
+    rng = np.random.default_rng(6)
+    seen = set()
+    for _ in range(600):
+        sc = sample_scenario(rng, cfg, [1, 2, 3], [7], (5, 1, "Normal"), curses=[90], specials=[500, 501])
+        n = sum(c in (500, 501) for c, _ in sc.deck)
+        assert 0 <= n <= 5
+        seen.add(n)
+    assert seen == {0, 1, 2, 3, 4, 5}

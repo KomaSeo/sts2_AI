@@ -1085,3 +1085,14 @@
   - 확인: 27 장 각각(강화 전·후)을 넣은 전투를 무작위 행동으로 돌렸다. 오류는 없었다. 확률 테스트를 넣었다.
   - 학습: runs/combat_only_v10 을 반복 24 에서 끊고 runs/combat_only_v11 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py, tests/test_combat_only.py
+
+### 2026-11-19 · 특수 카드를 덱마다 0~5 장으로 (v12)
+- 출처: [사용자 지시] / 세부는 [AI 임의 결정]
+- 사용자 원문: "They may not THAT Rare. so put them 0~5per deck"
+- 이유: 사용자가 밝힌 이유는 "They may not THAT Rare" (그렇게 드물지 않다).
+- 내용
+  - 특수 카드(이벤트·고대 등급 27 장)를 25% 확률 1 장 대신, 덱마다 0~5 장 고르게 넣는다 (special_min/max = 0/5).
+    - 같은 카드가 여러 장 나올 수 있다. — [AI 임의 결정] (저주와 같은 방식)
+  - 확률 방식(special_prob)은 기본값으로 남겼다. 0~5 장 전부가 나오는지 테스트를 넣었다.
+  - 학습: runs/combat_only_v11 을 반복 0 에서 끊고 runs/combat_only_v12 에서 처음부터 다시 학습한다.
+- 관련 파일: sts2ai/train/combat_only.py, tests/test_combat_only.py
