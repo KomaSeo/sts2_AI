@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>전투 에이전트 입력</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;600;700&display=swap">
+<style>
+/* 레이아웃: 왼쪽에서 오른쪽으로 흐르는 3단 — 토큰 묶음들 → 토큰 하나를 벡터로 → 인코더와 두 출력. 아래에 "들어가지 않는 것". */
+:root{--bg:#f5f6f8;--fg:#1a2230;--mut:#5b6677;--line:#d9dee6;--card:#fff;--soft:#eef1f5;
+--act:#2f6fb3;--actsoft:#dce8f6;--enemy:#b4532b;--enemysoft:#f6e3da;--me:#1d7a46;--mesoft:#dcefe3;--new:#8a4fb5;--newsoft:#efe3f7;--miss:#9a6b00;--misssoft:#fbf1d9;
+--f-body:"IBM Plex Sans KR",system-ui,"Malgun Gothic",sans-serif;--f-num:"IBM Plex Mono",ui-monospace,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#11151b;--fg:#e5e9ef;--mut:#97a2b2;--line:#2a313b;--card:#191f27;--soft:#151a21;
+--act:#72a8e2;--actsoft:#1d2d40;--enemy:#e08a62;--enemysoft:#3a241b;--me:#58c287;--mesoft:#17301f;--new:#c59be6;--newsoft:#2c1f38;--miss:#e2b14a;--misssoft:#33290f;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#11151b;--fg:#e5e9ef;--mut:#97a2b2;--line:#2a313b;--card:#191f27;--soft:#151a21;
+--act:#72a8e2;--actsoft:#1d2d40;--enemy:#e08a62;--enemysoft:#3a241b;--me:#58c287;--mesoft:#17301f;--new:#c59be6;--newsoft:#2c1f38;--miss:#e2b14a;--misssoft:#33290f;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--f-body)}
+.wrap{max-width:1280px;margin:0 auto;padding-block:24px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:20px}
+h1{font-size:22px;margin:0;text-wrap:balance}
+.lead{margin:0;color:var(--mut);max-width:70ch}
+h2{font-size:13px;letter-spacing:.06em;color:var(--mut);margin:0 0 8px;font-weight:600}
+.flow{display:grid;grid-template-columns:minmax(0,1.55fr) 28px minmax(0,1fr) 28px minmax(0,1fr);gap:0;align-items:stretch}
+.arrow{display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:20px}
+.col{display:grid;gap:10px;align-content:start;min-width:0}
+.grp{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c,var(--line));border-radius:8px;padding:10px 12px;min-width:0}
+.grp h3{margin:0 0 4px;font-size:14px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.grp h3 .n{font-family:var(--f-num);font-size:11.5px;color:var(--mut);font-weight:400}
+.grp ul{margin:0;padding-left:18px}.grp li{margin:1px 0}
+.grp p{margin:2px 0}
+.v{font-family:var(--f-num);font-size:12px;color:var(--mut)}
+.act{--c:var(--act)}.me{--c:var(--me)}.enemy{--c:var(--enemy)}.new{--c:var(--new)}.misc{--c:var(--mut)}
+.tagnew{font-size:11px;color:var(--new);border:1px solid var(--new);border-radius:10px;padding:0 6px;font-weight:600}
+.tagoff{font-size:11px;color:var(--mut);border:1px dashed var(--mut);border-radius:10px;padding:0 6px}
+.sum{display:grid;gap:6px}
+.sum .row{display:flex;gap:8px;align-items:baseline;background:var(--soft);border-radius:6px;padding:6px 8px}
+.sum .plus{font-family:var(--f-num);color:var(--mut)}
+.model{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;display:grid;gap:10px}
+.box{border:1px solid var(--line);border-radius:6px;padding:8px 10px;background:var(--soft)}
+.box b{display:block}
+.out{display:grid;gap:8px}
+.out .box{background:var(--actsoft);border-color:transparent}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--mut)}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:var(--c)}
+.missing{background:var(--misssoft);border-radius:8px;padding:12px 14px}
+.missing h2{color:var(--miss)}
+.missing ul{margin:0;padding-left:18px;columns:2 340px;column-gap:28px}
+.missing li{break-inside:avoid;margin:2px 0}
+.foot{color:var(--mut);font-size:12.5px;margin:0}
+code{font-family:var(--f-num);font-size:12px}
+@media (max-width:900px){.flow{grid-template-columns:minmax(0,1fr)}.arrow{transform:rotate(90deg);height:28px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header style="display:grid;gap:6px">
+    <h1>전투 에이전트 입력</h1>
+    <p class="lead">전투 정책(CombatPolicy)이 한 시점에서 보는 것 전부입니다. 관측은 토큰 묶음이고, 순서 없는 Transformer 가 읽은 뒤 행동과 타깃을 고릅니다.
+      수치 뒤의 <span class="v">/50</span> 같은 표시는 모델에 넣을 때 나누는 값입니다.</p>
+    <div class="legend"><span style="--c:var(--act)">행동이 되는 토큰</span><span style="--c:var(--me)">내 상태</span><span style="--c:var(--enemy)">적</span><span style="--c:var(--new)">어댑터가 붙이는 토큰</span><span style="--c:var(--mut)">기타</span></div>
+  </header>
+
+  <div class="flow">
+    <!-- 1단: 토큰 묶음 -->
+    <div class="col">
+      <h2>① 관측 = 토큰 묶음</h2>
+
+      <div class="grp misc"><h3>전역 <span class="n">1개 · 항상 맨 앞</span></h3>
+        <ul>
+          <li>이번 전투(조우) 종류 <span class="v">임베딩</span></li>
+          <li>HP 비율 <span class="v">HP/최대 HP</span>, 방어도 <span class="v">/50</span>, 에너지 <span class="v">/10</span></li>
+          <li>뽑을·버린·소멸 더미 장수 <span class="v">/20</span></li>
+          <li>턴을 끝내면 잃을 HP 예측 4칸 <span class="tagoff">꺼짐 · 0</span></li>
+        </ul></div>
+
+      <div class="grp act"><h3>행동 토큰 <span class="n">토큰 1+i = 행동 i · 최대 32</span></h3>
+        <p><b>평소</b></p>
+        <ul>
+          <li>손패 카드 (손패 순서 그대로): 카드 종류 <span class="v">임베딩</span>, 강화 여부, 지금 비용 <span class="v">/5</span>, 인챈트 종류·수치</li>
+          <li>턴 종료</li>
+          <li>포션 칸 9개 (하나라도 있을 때): 포션 종류 <span class="v">임베딩</span>, 있는지</li>
+        </ul>
+        <p><b>카드 고르기 화면</b></p>
+        <ul>
+          <li>후보 카드 (카드 종류·강화·비용, 10장까지 공개)</li>
+          <li>고르지 않기</li>
+        </ul></div>
+
+      <div class="grp me"><h3>카드 더미 <span class="n">카드 한 장 = 토큰 하나</span></h3>
+        <ul>
+          <li>뽑을 더미 · 버린 더미 · 소멸 더미 (정렬됨, 뽑을 더미 순서는 모름)</li>
+          <li>고르기 화면일 때의 손패 (낼 수 없는 손패)</li>
+          <li>각각 카드 종류, 강화, 지금 비용 <span class="v">/5</span>, 인챈트</li>
+        </ul></div>
+
+      <div class="grp me"><h3>나 <span class="n">유물 · 버프</span></h3>
+        <ul>
+          <li>유물: 종류 <span class="v">임베딩</span>, 카운터 <span class="v">/20</span></li>
+          <li>버프·디버프 (힘, 취약 …): 종류 <span class="v">임베딩</span>, 수치 <span class="v">/20</span></li>
+        </ul></div>
+
+      <div class="grp enemy"><h3>적 <span class="n">적 슬롯마다 · 주인 = 슬롯 번호</span></h3>
+        <ul>
+          <li>적 종류 <span class="v">임베딩</span>, HP <span class="v">/50</span>, HP 비율, 방어도 <span class="v">/50</span> (죽은 적도 HP 0 으로 남음)</li>
+          <li>이번 턴 의도: 공격·방어·강화·약화·알 수 없음 + 수치 <span class="v">/30</span></li>
+          <li>다음 턴 의도 (시뮬레이터가 알려 줄 때)</li>
+          <li>적 버프·디버프: 종류, 수치 <span class="v">/20</span></li>
+        </ul></div>
+
+      <div class="grp new"><h3>자원 · 오브 <span class="n">어댑터가 맨 뒤에</span></h3>
+        <ul>
+          <li>골드 <span class="v">/300</span>, 최대 에너지 <span class="v">/10</span></li>
+          <li>오브 칸·별·오스티·오브마다 하나 (다른 직업용, 아이언클래드는 없음)</li>
+        </ul></div>
+
+      <div class="grp new"><h3>카드 고르기 화면 종류 <span class="tagnew">v6 새로</span></h3>
+        <p>고르기 화면이 열려 있을 때 하나: 손패 강화 · 손패 소멸 · 소멸 후 뽑기 · 뽑을 더미 → 손패 … (27 가지) <span class="v">임베딩</span></p></div>
+
+      <div class="grp misc"><h3>RUN 토큰 <span class="tagoff">전투만 학습에서는 없음</span></h3>
+        <p>런 학습 때만: 평가기가 만든 런 요약(덱·유물·상태·맵, 다음 노드가 휴식인지 등) 벡터 하나.</p></div>
+    </div>
+
+    <div class="arrow" aria-hidden="true">→</div>
+
+    <!-- 2단: 토큰 하나 → 벡터 -->
+    <div class="col">
+      <h2>② 토큰 하나를 벡터 128칸으로</h2>
+      <div class="grp misc sum">
+        <div class="row"><span class="plus"> </span><span>토큰 종류 <span class="v">21가지</span></span></div>
+        <div class="row"><span class="plus">+</span><span>주인 <span class="v">나 / 적 슬롯 1~8</span></span></div>
+        <div class="row"><span class="plus">+</span><span>id 임베딩, 종류마다 다른 표<br><span class="v">카드 · 버프 · 의도 · 적 · 유물 · 포션 · 조우 · 오브 · 자원 · 고르기</span></span></div>
+        <div class="row"><span class="plus">+</span><span>수치 18칸 → 선형층<br><span class="v">HP, 방어도, 에너지, 더미 장수, 강화, 비용, 인챈트 수치, 적 HP·비율·방어도, 의도 수치, 크기(버프·카운터), 턴 종료 예측 4칸</span></span></div>
+        <div class="row"><span class="plus">+</span><span>인챈트 임베딩 (카드 토큰만)</span></div>
+      </div>
+      <p class="foot">카드·유물·적 임베딩은 덱·유물 인코더(평가기)와 같은 표를 씁니다. 카드 효과 문구는 들어가지 않고, 카드마다 벡터를 학습으로 익힙니다.</p>
+    </div>
+
+    <div class="arrow" aria-hidden="true">→</div>
+
+    <!-- 3단: 인코더와 출력 -->
+    <div class="col">
+      <h2>③ 읽고 고르기</h2>
+      <div class="model">
+        <div class="box"><b>순서 없는 Transformer</b><span class="v">3층 · 128칸 · 머리 4개 · 위치 인코딩 없음</span><br>모든 토큰이 서로를 봅니다 (적 의도 ↔ 손패 ↔ 버프).</div>
+        <div class="out">
+          <div class="box"><b>행동 고르기</b>행동 토큰마다 [그 토큰 ; 전역 토큰] → 작은 MLP → 점수. 지금 낼 수 없는 행동은 지우고 softmax.</div>
+          <div class="box"><b>타깃 고르기</b>적이 필요한 카드·포션이면: 고른 행동 토큰(질의) · 적 토큰(열쇠) → 적마다 점수 → softmax.</div>
+        </div>
+        <p class="foot">학습: 같은 전투를 같은 시드로 8번 싸워 점수(이기면 1 + 남은 HP 비율, 지면 적에게 준 피해 비율)로 순위를 매기는 GRPO.</p>
+      </div>
+    </div>
+  </div>
+
+  <section class="missing">
+    <h2>들어가지 않는 것</h2>
+    <ul>
+      <li><b>적이 몇 번 때리는지</b>: 의도 수치는 한 번 피해뿐입니다. 공격 12 × 3 인지 알 수 없습니다.</li>
+      <li><b>내 HP 의 실제 값과 최대 HP</b>: HP 비율만 들어갑니다. 80 중 40 과 40 중 20 이 같아 보입니다.</li>
+      <li><b>몇 번째 턴인지</b>, 이번 턴에 이미 낸 카드 목록 (버린 더미로만 짐작).</li>
+      <li><b>카드 효과 문구</b>: 카드는 id 로만 구분합니다. 처음 보는 카드는 무엇을 하는지 모릅니다.</li>
+      <li><b>고르기 화면을 연 카드</b>: 화면 종류는 들어가지만(v6) 어떤 카드가 열었는지는 없습니다.</li>
+      <li><b>뽑을 더미의 순서</b>: 일부러 정렬해서 숨깁니다 (실제 게임에서도 모름).</li>
+      <li><b>턴 종료 예측</b>: 칸은 있지만 계산이 느려서 꺼 두었습니다 (늘 0).</li>
+      <li><b>후보가 10장을 넘는 고르기 화면</b>: 11번째부터는 카드 정체가 비어 있습니다.</li>
+      <li><b>적의 최대 HP·다음 행동 패턴 규칙</b>: 적 종류 임베딩으로 학습해 익혀야 합니다.</li>
+    </ul>
+  </section>
+
+  <p class="foot">출처: <code>../sts2/rl/combat_tokens.py</code> (토큰 대부분), <code>sts2ai/envs/sts2_adapter.py</code> (지금 비용·인챈트·포션 종류·자원·고르기 종류), <code>sts2ai/encoders/combat.py</code>, <code>sts2ai/agents/combat_policy.py</code>. 2026-11-18 기준.</p>
+</div>
+</body>
+</html>

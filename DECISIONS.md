@@ -899,3 +899,13 @@
     - 예전 가중치는 _adapt_state 가 늘어난 줄만 초기값으로 채워 읽는다. 새 임베딩은 초기값이다.
   - 학습: runs/combat_only_v5 를 끊고 runs/combat_only_v6 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/schema.py, sts2ai/encoders/combat.py, sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, sts2ai/train/fight_view.py
+
+### 2026-11-18 · 전투 에이전트 입력 그림
+- 출처: [사용자 지시] / 그리는 방식은 [AI 임의 결정]
+- 사용자 원문: "그리고 전투 에이전트에 어떤 정보가 들어가는지 모두 나열하는 그림을 하나 그려줘"
+- 이유: 이유 미기재.
+- 내용
+  - docs/combat_agent_inputs.html 한 장 (로컬 파일, 아티팩트로 올리지 않음).
+  - 세 단으로 나눴다: ① 토큰 묶음(전역, 행동, 카드 더미, 유물·버프, 적, 자원, 고르기 종류, RUN) → ② 토큰 하나를 벡터로 만드는 합 → ③ Transformer 와 행동·타깃 머리.
+  - 아래에 "들어가지 않는 것"을 모았다: 적 공격 횟수, 실제 HP·최대 HP(비율만 들어감), 턴 번호, 카드 효과 문구, 고르기 화면을 연 카드 등. — [AI 임의 결정]
+- 관련 파일: docs/combat_agent_inputs.html
