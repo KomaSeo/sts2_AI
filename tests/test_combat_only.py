@@ -36,3 +36,15 @@ def test_potion_count_bands():
     assert abs((n <= 2).mean() - 0.7) < 0.02
     assert abs(((n >= 3) & (n <= 6)).mean() - 0.2) < 0.02
     assert abs((n >= 7).mean() - 0.1) < 0.02
+
+
+def test_starter_cards_first():
+    cfg = CombatConfig()
+    rng = np.random.default_rng(1)
+    starters = [(10, 0, 5), (11, 0, 5), (12, 0, 1)]
+    for _ in range(300):
+        sc = sample_scenario(rng, cfg, [1, 2, 3, 10, 11, 12], [7], (5, 2, "Elite"), starters=starters)
+        ids = [c for c, _ in sc.deck]
+        assert ids.count(10) <= 5 and ids.count(11) <= 5 and ids.count(12) <= 1
+        assert cfg.deck_min <= len(ids) <= max(cfg.deck_max, 11)
+        assert all(c in (1, 2, 3, 10, 11, 12) for c in ids)

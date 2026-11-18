@@ -5,7 +5,8 @@
 옮긴 것이다.
 
 시나리오 하나 = (적 조우, 시뮬레이터 막) + 완전 무작위 덱 + 무작위 포션 + 무작위 최대 HP·HP + 시드.
-- 덱: 직업(아이언클래드)·무색 카드 풀에서 deck_min~deck_max 장을 고르게 뽑고, 장마다 upgrade_prob 로 강화.
+- 덱: deck_min~deck_max 장. 먼저 시작 카드(starter_cards: 타격 0~5, 수비 0~5, 강타 0~1)를 뽑고, 나머지를
+  직업(아이언클래드)·무색 카드 풀(시작 카드 제외)에서 고르게 채운다. 장마다 upgrade_prob 로 강화.
   시작 덱(타격·수비)도 따로 넣지 않는다. 저주·상태이상은 넣지 않는다. 유물은 없다.
 - 상대: 반복마다 모든 (조우, 막) 을 한 바퀴(고루) + 같은 수를 '사망률' 에 비례해 더 뽑는다(집중).
 - GRPO 그룹: 같은 시나리오·같은 시드로 G 번 싸운다(공통 난수). 시행 사이 차이는 정책의 선택에서만 나온다.
@@ -46,6 +47,8 @@ class CombatConfig:
     deck_min: int = 10
     deck_max: int = 40
     upgrade_prob: float = 0.2
+    # 먼저 넣을 시작 카드 "시뮬레이터 카드 이름:최소-최대". 나머지는 이 카드들을 뺀 풀에서 채운다
+    starter_cards: str = "StrikeIronclad:0-5,DefendIronclad:0-5,Bash:0-1"
     # 포션 개수: "최소-최대:확률" 구간을 확률로 고른 뒤 구간 안에서 고르게. 쓸 수 있는 칸을 포션 수만큼 늘린다 (시뮬레이터 칸 9)
     potion_bands: str = "0-2:0.7,3-6:0.2,7-9:0.1"
     relics_min: int = 0
@@ -122,10 +125,25 @@ def sample_potion_count(rng: np.random.Generator, spec: str) -> int:
     return int(rng.integers(lo, hi + 1))
 
 
+def parse_starters(spec: str, name_to_id: dict[str, int]) -> list[tuple[int, int, int]]:
+    """"StrikeIronclad:0-5,Bash:0-1" → [(카드 id, 최소, 최대)]."""
+    out = []
+    for part in filter(None, spec.split(",")):
+        name, rng_s = part.split(":")
+        lo, hi = (int(x) for x in rng_s.split("-"))
+        out.append((int(name_to_id[name]), lo, hi))
+    return out
+
+
 def sample_scenario(rng: np.random.Generator, cfg: CombatConfig, cards, pots, enc: tuple[int, int, str],
-                    relic_pool=()) -> Scenario:
+                    relic_pool=(), starters: list[tuple[int, int, int]] = ()) -> Scenario:
+    """starters 를 주면 그 카드들을 먼저 넣고, 나머지는 cards 에서 starters 를 뺀 풀로 채운다."""
     n = int(rng.integers(cfg.deck_min, cfg.deck_max + 1))
-    deck = [(int(c), bool(rng.random() < cfg.upgrade_prob)) for c in rng.choice(cards, n)]
+    ids = [cid for cid, lo, hi in starters for _ in range(int(rng.integers(lo, hi + 1)))]
+    fill_pool = [c for c in cards if c not in {s[0] for s in starters}] if starters else list(cards)
+    rest = max(0, n - len(ids))
+    ids += [int(c) for c in rng.choice(fill_pool, rest)] if rest else []
+    deck = [(int(c), bool(rng.random() < cfg.upgrade_prob)) for c in ids]
     n_pot = sample_potion_count(rng, cfg.potion_bands)
     potions = [int(p) for p in rng.choice(pots, n_pot)] if n_pot else []
     max_hp = int(rng.integers(cfg.max_hp_min, cfg.max_hp_max + 1))
@@ -386,6 +404,7 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
     run.reset(12345)
     pool = combat_pool(run)
     cards, pots, relic_pool = card_pool(run), potion_pool(run), run.relic_pool()
+    starters = parse_starters(cfg.starter_cards, {info.name: cid for cid, info in run.lib.cards.items()})
     device = resolve_device(cfg.device)
     policy = CombatPolicy(SharedEmbeddings(run.vocab, cfg.d_model), layers=cfg.layers).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr_policy)
@@ -395,7 +414,7 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
     log(f"device={device} workers={cfg.workers} 적(조우,막)={len(pool)} 카드풀={len(cards)} 포션풀={len(pots)} "
         f"유물풀={len(relic_pool)} 파라미터={sum(p.numel() for p in policy.parameters()):,}")
     eval_rng = np.random.default_rng(10**6 + cfg.seed)
-    eval_set = [sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool) for _ in range(cfg.eval_rounds) for e in pool]
+    eval_set = [sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool, starters) for _ in range(cfg.eval_rounds) for e in pool]
     death = np.full(len(pool), 0.5)
     history: list[dict] = []
     start = 0
@@ -454,7 +473,7 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
             if nf:
                 w = np.maximum(death, cfg.focus_floor)
                 idx += [int(i) for i in rng.choice(len(pool), nf, p=w / w.sum())]
-            scs = [sample_scenario(rng, cfg, cards, pots, pool[i], relic_pool) for i in idx]
+            scs = [sample_scenario(rng, cfg, cards, pots, pool[i], relic_pool, starters) for i in idx]
             a = actor()
             groups = runner.play(a, scs, False, rng)
             t_play = time.time() - t0
