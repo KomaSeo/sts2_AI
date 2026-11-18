@@ -190,7 +190,7 @@ def to_html(folder: Path, data: list[tuple[int, list[dict]]]) -> str:
 
 def to_artifact(folder: Path, data: list[tuple[int, list[dict]]]) -> str:
     """claude.ai 아티팩트로 올릴 내용 (문서 뼈대는 올릴 때 붙는다)."""
-    return (f'<title>{html.escape(folder.name)} 전투 기록</title>'
+    return (f"<title>전투 학습 기록</title>"
             f'<meta name="claude:viewport-fit-sides" content="cover">{FONTS}<style>{CSS}</style>'
             f'{body_html(folder, data)}')
 
