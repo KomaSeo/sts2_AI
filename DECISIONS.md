@@ -1096,3 +1096,12 @@
   - 확률 방식(special_prob)은 기본값으로 남겼다. 0~5 장 전부가 나오는지 테스트를 넣었다.
   - 학습: runs/combat_only_v11 을 반복 0 에서 끊고 runs/combat_only_v12 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/train/combat_only.py, tests/test_combat_only.py
+
+### 2026-11-19 · 추론 서버를 쓸 때 워커에 가중치를 보내지 않기 (WinError 1450 수정)
+- 출처: [AI 임의 결정]
+- 이유
+  - v12 첫 반복에서 "시스템 리소스가 부족" (WinError 1450) 으로 학습이 멈췄다.
+  - 원인: 워커 작업마다 정책 가중치(11M ≈ 48 MB)를 같이 보냈다. 반복당 약 300 번 복사됐다.
+  - 추론 서버를 쓰면 워커는 가중치를 쓰지 않으므로 빈 값을 보낸다. 서버를 안 쓰는 작은 모델은 예전처럼 보낸다.
+  - runs/combat_only_v12 를 처음부터 다시 띄웠다.
+- 관련 파일: sts2ai/train/combat_only.py

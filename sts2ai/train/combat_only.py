@@ -479,7 +479,10 @@ class Runner:
                 with torch.no_grad():
                     out += play_scenarios(policy, self.run, ch, self.cfg.group_size, greedy, self.cfg.max_steps)
             return out
-        res = self.pool.map(_work, [(self.version, self.blob, ch, greedy, s) for ch, s in zip(chunks, seeds)],
+        # 추론 서버를 쓰면 워커는 가중치가 필요 없다. 큰 모델(11M ≈ 48 MB)을 작업마다 보내면
+        # 반복당 수백 번 복사돼 Windows 에서 시스템 리소스가 바닥났다 (WinError 1450).
+        blob = b"" if self.server is not None else self.blob
+        res = self.pool.map(_work, [(self.version, blob, ch, greedy, s) for ch, s in zip(chunks, seeds)],
                             chunksize=1)
         return [g for r in res for g in r]
 
