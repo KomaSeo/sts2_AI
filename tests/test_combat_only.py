@@ -1,6 +1,6 @@
 import numpy as np
 
-from sts2ai.train.combat_only import CombatConfig, Scenario, sample_scenario, summarize
+from sts2ai.train.combat_only import CombatConfig, Scenario, sample_potion_count, sample_scenario, summarize
 from sts2ai.train.grpo import Trajectory
 
 
@@ -11,7 +11,7 @@ def test_sample_scenario_ranges():
         sc = sample_scenario(rng, cfg, [1, 2, 3], [7, 8], (5, 2, "Elite"), relic_pool=list(range(100, 150)))
         assert cfg.deck_min <= len(sc.deck) <= cfg.deck_max
         assert all(c in (1, 2, 3) for c, _ in sc.deck)
-        assert len(sc.potions) <= cfg.potions_max
+        assert len(sc.potions) <= 9
         assert cfg.max_hp_min <= sc.max_hp <= cfg.max_hp_max
         assert 1 <= sc.hp <= sc.max_hp
         assert (sc.encounter, sc.sim_act, sc.kind) == (5, 2, "Elite")
@@ -27,3 +27,12 @@ def test_summarize_by_kind():
     s = summarize([g_w, g_b], [sc_w, sc_b], "")
     assert s["n"] == 3 and abs(s["win_Weak"] - 0.5) < 1e-9 and s["win_Boss"] == 0.0
     assert abs(s["hp_left_win"] - 0.4) < 1e-9
+
+
+def test_potion_count_bands():
+    rng = np.random.default_rng(0)
+    n = np.array([sample_potion_count(rng, CombatConfig().potion_bands) for _ in range(20000)])
+    assert n.min() == 0 and n.max() == 9
+    assert abs((n <= 2).mean() - 0.7) < 0.02
+    assert abs(((n >= 3) & (n <= 6)).mean() - 0.2) < 0.02
+    assert abs((n >= 7).mean() - 0.1) < 0.02

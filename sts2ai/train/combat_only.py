@@ -46,7 +46,8 @@ class CombatConfig:
     deck_min: int = 10
     deck_max: int = 40
     upgrade_prob: float = 0.2
-    potions_max: int = 9  # 포션 0~이 값 개. 쓸 수 있는 칸을 포션 수만큼 늘린다 (시뮬레이터 칸 9)
+    # 포션 개수: "최소-최대:확률" 구간을 확률로 고른 뒤 구간 안에서 고르게. 쓸 수 있는 칸을 포션 수만큼 늘린다 (시뮬레이터 칸 9)
+    potion_bands: str = "0-2:0.7,3-6:0.2,7-9:0.1"
     relics_min: int = 0
     relics_max: int = 40  # 유물 0~이 값 개, Sts2Run.relic_pool() 에서 겹치지 않게
     max_hp_min: int = 50
@@ -104,11 +105,28 @@ def potion_pool(run) -> list[int]:
     return sorted(run.lib.potion_index)
 
 
+def parse_bands(spec: str) -> list[tuple[int, int, float]]:
+    """"0-2:0.7,3-6:0.2,7-9:0.1" → [(0, 2, 0.7), (3, 6, 0.2), (7, 9, 0.1)]."""
+    out = []
+    for part in spec.split(","):
+        rng_s, w = part.split(":")
+        lo, hi = (int(x) for x in rng_s.split("-"))
+        out.append((lo, hi, float(w)))
+    return out
+
+
+def sample_potion_count(rng: np.random.Generator, spec: str) -> int:
+    bands = parse_bands(spec)
+    w = np.array([b[2] for b in bands])
+    lo, hi, _ = bands[int(rng.choice(len(bands), p=w / w.sum()))]
+    return int(rng.integers(lo, hi + 1))
+
+
 def sample_scenario(rng: np.random.Generator, cfg: CombatConfig, cards, pots, enc: tuple[int, int, str],
                     relic_pool=()) -> Scenario:
     n = int(rng.integers(cfg.deck_min, cfg.deck_max + 1))
     deck = [(int(c), bool(rng.random() < cfg.upgrade_prob)) for c in rng.choice(cards, n)]
-    n_pot = int(rng.integers(0, cfg.potions_max + 1))
+    n_pot = sample_potion_count(rng, cfg.potion_bands)
     potions = [int(p) for p in rng.choice(pots, n_pot)] if n_pot else []
     max_hp = int(rng.integers(cfg.max_hp_min, cfg.max_hp_max + 1))
     hp = max(1, int(round(max_hp * rng.uniform(cfg.hp_frac_min, 1.0))))
