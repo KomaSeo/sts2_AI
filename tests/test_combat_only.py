@@ -131,3 +131,29 @@ def test_special_card_count_range():
         assert 0 <= n <= 5
         seen.add(n)
     assert seen == {0, 1, 2, 3, 4, 5}
+
+
+def test_relic_cards_with_simulator():
+    """시뮬레이터가 있을 때만: 고대의 존재 유물이 주는 카드가 덱에 들어가고 무작위 풀에서는 빠진다."""
+    import pytest
+    from pathlib import Path
+
+    if not (Path(__file__).resolve().parents[2] / "sts2" / "out").exists():
+        pytest.skip("../sts2 시뮬레이터 없음")
+    from sts2ai.envs.sts2_adapter import Sts2Run
+    from sts2ai.train import combat_only as co
+    from sts2ai.train.relic_cards import RelicCards
+
+    r = Sts2Run(str(Path(__file__).resolve().parents[2] / "sts2"), combat_probe=False)
+    rc = RelicCards(r)
+    rid = {v: k for k, v in rc.relic_name.items()}
+    s, b = rc.card_id["StrikeIronclad"], rc.card_id["Bash"]
+    deck, mh, hp, _ = rc.apply([(s, False)] * 3 + [(b, False)], [rid["ArchaicTooth"], rid["PaelsHorn"],
+                                                                   rid["DistinguishedCape"]], 80, 80,
+                               np.random.default_rng(0))
+    ids = [c for c, _ in deck]
+    assert rc.card_id["Break"] in ids and b not in ids
+    assert ids.count(rc.card_id["Relax"]) == 2 and ids.count(rc.card_id["Apparition"]) == 3
+    assert mh == 71 and hp == 71
+    P = co.scenario_pools(r, CombatConfig(relic_cards=True))
+    assert not (set(P["cards"]) | set(P["curses"]) | set(P["specials"])) & rc.reserved

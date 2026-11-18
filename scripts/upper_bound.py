@@ -44,13 +44,9 @@ def main() -> None:
     run = Sts2Run(args.sts2_repo)
     run.reset(12345)
     pool = co.combat_pool(run)
-    cards, pots, relic_pool = co.card_pool(run), co.potion_pool(run), run.relic_pool()
-    starters = co.parse_starters(cfg.starter_cards, {i.name: c for c, i in run.lib.cards.items()})
-    ancients = run.ancient_relic_pools() if getattr(cfg, "relic_scheme", "uniform") == "acts" else None
+    P = co.scenario_pools(run, cfg)
     eval_rng = np.random.default_rng(10**6 + cfg.seed)  # 학습의 검증 전투와 같은 난수
-    eval_set = [co.sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool, starters, ancients, co.curse_pool(run),
-                                co.special_pool(run))
-                for _ in range(cfg.eval_rounds) for e in pool]
+    eval_set = [co.scenario_from(eval_rng, cfg, P, e) for _ in range(cfg.eval_rounds) for e in pool]
 
     policy = co.make_policy(run.vocab, cfg)
     policy.load_state_dict(torch.load(folder / "combat_policy.pt", map_location="cpu"))
