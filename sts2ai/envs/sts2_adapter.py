@@ -537,6 +537,21 @@ class Sts2Run:
             self.lib._enc_kind = kinds
         return kinds.get(int(raw_id), "Normal")
 
+    def relic_pool(self) -> list[int]:
+        """전투만 학습할 때 넣을 유물 후보: 공용 + 아이언클래드 풀 + 어느 직업 풀에도 없는 유물(이벤트·고대인 등).
+        다른 직업 풀의 유물은 뺀다 (RelicPools.g.cs)."""
+        pool = getattr(self.lib, "_relic_pool", None)
+        if pool is None:
+            import re  # noqa: PLC0415
+
+            text = (self.lib.repo / "src" / "Sts2Emulator" / "Generated" / "RelicPools.g.cs").read_text(encoding="utf-8")
+            pools = {n: {int(x) for x in b.replace("\n", "").split(",") if x.strip()}
+                     for n, b in re.findall(r"(\w+) =>\s*\[([^\]]*)\]", text)}
+            others = set().union(*(v for k, v in pools.items() if k not in ("Shared", "Ironclad")))
+            pool = sorted(r for r in self.lib.names.relics() if r not in others)
+            self.lib._relic_pool = pool
+        return pool
+
     def transform_pool(self) -> list[int]:
         """변환 결과 후보: 직업·무색 카드 (저주·상태이상 제외)."""
         return [c for c in self.lib.probe_card_pool if self.card_upgradable(c)]
@@ -555,6 +570,10 @@ class Sts2Run:
         relics = [int(r["relic_id"]) for r in info["relic_slots"]] if relics is None else [int(r) for r in relics]
         max_hp = int(info["player_max_hp"]) if max_hp is None else int(max_hp)
         pots = [int(p) for p in info["potions"] if p] if potions is None else [int(p) for p in potions]
+        if potions is not None and len(pots) > 0:
+            # 쓸 수 있는 포션 칸을 준 포션 수만큼 (시뮬레이터 칸 수 한계 PotionSlotCapacity 안에서)
+            c.lib.native.run_debug_set_player(c.env._run_handle, c.env._run_obs_buf,  # noqa: SLF001
+                                              max_potion_slots=len(pots))
         status = c.lib.native.run_start_combat(
             c.env._run_handle, ids, int(encounter), relics, int(hp), max_hp, pots,  # noqa: SLF001
             int(info["gold"]), int(combats_before), c.env._run_obs_buf)  # noqa: SLF001

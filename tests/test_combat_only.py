@@ -8,13 +8,15 @@ def test_sample_scenario_ranges():
     cfg = CombatConfig()
     rng = np.random.default_rng(0)
     for _ in range(200):
-        sc = sample_scenario(rng, cfg, [1, 2, 3], [7, 8], (5, 2, "Elite"))
+        sc = sample_scenario(rng, cfg, [1, 2, 3], [7, 8], (5, 2, "Elite"), relic_pool=list(range(100, 150)))
         assert cfg.deck_min <= len(sc.deck) <= cfg.deck_max
         assert all(c in (1, 2, 3) for c, _ in sc.deck)
         assert len(sc.potions) <= cfg.potions_max
         assert cfg.max_hp_min <= sc.max_hp <= cfg.max_hp_max
         assert 1 <= sc.hp <= sc.max_hp
         assert (sc.encounter, sc.sim_act, sc.kind) == (5, 2, "Elite")
+        assert cfg.relics_min <= len(sc.relics) <= cfg.relics_max and len(set(sc.relics)) == len(sc.relics)
+        assert all(100 <= r < 150 for r in sc.relics)
 
 
 def test_summarize_by_kind():

@@ -24,8 +24,37 @@ def load(folder: Path) -> list[tuple[int, list[dict]]]:
     return out
 
 
+INTENT_KO = {"Attack": "공격", "Defend": "방어", "Buff": "강화", "Debuff": "약화", "Unknown": "알 수 없음"}
+
+
+def intent_str(x) -> str:
+    if not x:
+        return "?"
+    kind, mag = x
+    k = INTENT_KO.get(kind, kind)
+    return f"{k} {mag}" if mag else k
+
+
+def enemies_of(s: dict) -> list[dict]:
+    """fmt 2: 이름·HP·방어도·의도. 예전 기록(fmt 없음)은 적 HP 만 있고, 배율을 잘못(×100) 되돌려 두 배였다 → 반으로."""
+    if "enemies" in s:
+        return s["enemies"]
+    return [{"name": "?", "hp": round(h / 2)} for h in s.get("enemy_hp", [])]
+
+
+def enemy_str(e: dict) -> str:
+    out = f"{e['name']} HP {e['hp']}" + (f" 방어 {e['block']}" if e.get("block") else "")
+    if "intent" in e:
+        out += f" · {intent_str(e['intent'])}" + (f" → 다음 {intent_str(e['next'])}" if e.get("next") else "")
+    return out
+
+
+def who(rec: dict) -> str:
+    return ", ".join(rec.get("enemy_names") or []) or f"적 {rec['encounter']}"
+
+
 def head(rec: dict) -> str:
-    return (f"{'승리' if rec['won'] else '패배'} · 적 {rec['encounter']} (막 {rec['sim_act']}, {rec['kind']}) · "
+    return (f"{'승리' if rec['won'] else '패배'} · {who(rec)} (막 {rec['sim_act']}, {rec['kind']}) · "
             f"HP {rec['hp_start']}/{rec['max_hp']} → {rec['hp_end']} · 점수 {rec['score']}")
 
 
@@ -33,11 +62,14 @@ def to_md(it: int, recs: list[dict]) -> str:
     lines = [f"# 반복 {it}", ""]
     for r in recs:
         lines += [f"## {head(r)}", "", f"- 덱 {len(r['deck'])}장: " + ", ".join(r["deck"]),
-                  "- 포션: " + (", ".join(r["potions"]) or "없음"), "",
-                  "| 턴 | HP | 에너지 | 적 HP | 고른 행동 | 확률 | 확률 높은 행동 3개 |", "|---|---|---|---|---|---|---|"]
+                  "- 포션: " + (", ".join(r["potions"]) or "없음"),
+                  "- 유물: " + (", ".join(r.get("relics", [])) or "없음"), "",
+                  "| 턴 | HP | 방어 | 에너지 | 적 (HP · 이번 턴 행동) | 고른 행동 | 확률 | 확률 높은 행동 3개 |",
+                  "|---|---|---|---|---|---|---|---|"]
         for s in r["steps"]:
             top = " / ".join(f"{n} {p}%" for n, p in s["top"])
-            lines.append(f"| {s['turn']} | {s['hp']} | {s['energy']} | {', '.join(map(str, s['enemy_hp']))} | "
+            lines.append(f"| {s['turn']} | {s['hp']} | {s.get('block', '')} | {s['energy']} | "
+                         f"{'<br>'.join(enemy_str(e) for e in enemies_of(s))} | "
                          f"{s['action']} | {s['prob_pct']}% | {top} |")
         lines.append("")
     return "\n".join(lines)
@@ -55,17 +87,19 @@ def fight_html(r: dict) -> str:
         p = s["prob_pct"]
         rows.append(
             f'<tr class="b{band}"><td class="n">{s["turn"]}</td><td class="n">{s["hp"]}</td>'
-            f'<td class="n">{s["energy"]}</td><td class="n">{e(", ".join(map(str, s["enemy_hp"])))}</td>'
+            f'<td class="n">{s.get("block", "")}</td><td class="n">{s["energy"]}</td>'
+            f'<td class="en">{"<br>".join(e(enemy_str(x)) for x in enemies_of(s))}</td>'
             f'<td class="act">{e(s["action"])}</td>'
             f'<td class="pr"><div class="bar"><i style="width:{min(100, p)}%"></i></div><span>{p}%</span></td>'
             f'<td class="top">{top}</td></tr>')
     cls = "win" if r["won"] else "loss"
     return f"""<section class="fight {cls}">
-<h3><span class="tag">{'승리' if r['won'] else '패배'}</span> 적 {r['encounter']} · 막 {r['sim_act']} · {e(r['kind'])}
+<h3><span class="tag">{'승리' if r['won'] else '패배'}</span> {e(who(r))} · 막 {r['sim_act']} · {e(r['kind'])}
  <small>HP {r['hp_start']}/{r['max_hp']} → {r['hp_end']} · 점수 {r['score']} · 행동 {len(r['steps'])}번</small></h3>
-<details><summary>덱 {len(r['deck'])}장 · 포션 {len(r['potions'])}개</summary>
-<p>{e(', '.join(r['deck']))}</p><p>포션: {e(', '.join(r['potions']) or '없음')}</p></details>
-<div class="scroll"><table><thead><tr><th>턴</th><th>HP</th><th>에너지</th><th>적 HP</th><th>고른 행동</th>
+<details><summary>덱 {len(r['deck'])}장 · 포션 {len(r['potions'])}개 · 유물 {len(r.get('relics', []))}개</summary>
+<p>{e(', '.join(r['deck']))}</p><p>포션: {e(', '.join(r['potions']) or '없음')}</p>
+<p>유물: {e(', '.join(r.get('relics', [])) or '없음')}</p></details>
+<div class="scroll"><table><thead><tr><th>턴</th><th>HP</th><th>방어</th><th>에너지</th><th>적 (HP · 이번 턴 행동)</th><th>고른 행동</th>
 <th>확률</th><th>확률 높은 행동 3개</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>"""
 
 
@@ -83,7 +117,7 @@ h3{margin:0 0 6px;font-size:15px}h3 small{color:var(--mut);font-weight:normal;ma
 .scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
 th{color:var(--mut);font-weight:600}.n{text-align:right;font-variant-numeric:tabular-nums}tr.b1{background:var(--b1)}
 .pr{display:flex;align-items:center;gap:6px}.bar{width:60px;height:6px;background:var(--line);border-radius:3px;overflow:hidden}.bar i{display:block;height:100%;background:var(--acc)}
-.pr span{font-variant-numeric:tabular-nums;min-width:44px;text-align:right}.top{color:var(--mut)}.alt{margin-right:10px}.alt.chosen{color:var(--fg)}
+.pr span{font-variant-numeric:tabular-nums;min-width:44px;text-align:right}.top{color:var(--mut)}td.en{font-size:12px;line-height:1.35}.alt{margin-right:10px}.alt.chosen{color:var(--fg)}
 """
 
 
