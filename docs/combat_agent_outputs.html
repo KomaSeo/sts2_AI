@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>전투 에이전트 출력</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;600;700&display=swap">
+<style>
+/* 레이아웃: 위에 한 줄 요약, 아래로 출력마다 한 칸 (무엇·모양·쓰는 곳), 끝에 내지 않는 것. 입력 그림(combat_agent_inputs.html)과 같은 토큰. */
+:root{--bg:#f5f6f8;--fg:#1a2230;--mut:#5b6677;--line:#d9dee6;--card:#fff;--soft:#eef1f5;
+--act:#2f6fb3;--actsoft:#dce8f6;--enemy:#b4532b;--enemysoft:#f6e3da;--miss:#9a6b00;--misssoft:#fbf1d9;
+--f-body:"IBM Plex Sans KR",system-ui,"Malgun Gothic",sans-serif;--f-num:"IBM Plex Mono",ui-monospace,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#11151b;--fg:#e5e9ef;--mut:#97a2b2;--line:#2a313b;--card:#191f27;--soft:#151a21;
+--act:#72a8e2;--actsoft:#1d2d40;--enemy:#e08a62;--enemysoft:#3a241b;--miss:#e2b14a;--misssoft:#33290f;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#11151b;--fg:#e5e9ef;--mut:#97a2b2;--line:#2a313b;--card:#191f27;--soft:#151a21;
+--act:#72a8e2;--actsoft:#1d2d40;--enemy:#e08a62;--enemysoft:#3a241b;--miss:#e2b14a;--misssoft:#33290f;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 var(--f-body)}
+.wrap{max-width:1080px;margin:0 auto;padding-block:24px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:18px}
+h1{font-size:22px;margin:0;text-wrap:balance}
+.lead{margin:0;color:var(--mut);max-width:72ch}
+.summary{display:flex;gap:10px;flex-wrap:wrap;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.chip{border-radius:6px;padding:4px 10px;background:var(--soft);font-weight:600}
+.chip.a{background:var(--actsoft)}.chip.t{background:var(--enemysoft)}
+.sep{color:var(--mut)}
+.out{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c,var(--line));border-radius:8px;padding:12px 14px;display:grid;gap:8px;min-width:0}
+.out.a{--c:var(--act)}.out.t{--c:var(--enemy)}.out.m{--c:var(--mut)}
+.out h2{margin:0;font-size:16px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.out h2 .shape{font-family:var(--f-num);font-size:12px;color:var(--mut);font-weight:400}
+.out p{margin:0;max-width:75ch}
+.scroll{overflow-x:auto;min-width:0}
+table{border-collapse:collapse;font-size:13px;width:100%}
+th,td{padding:5px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px}
+td.k{font-family:var(--f-num);white-space:nowrap}
+.dt{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:0}
+.dt dt{color:var(--mut);font-size:12.5px}.dt dd{margin:0}
+.missing{background:var(--misssoft);border-radius:8px;padding:12px 14px}
+.missing h2{color:var(--miss);font-size:13px;letter-spacing:.06em;margin:0 0 6px}
+.missing ul{margin:0;padding-left:18px}.missing li{margin:3px 0}
+code{font-family:var(--f-num);font-size:12px}
+.foot{color:var(--mut);font-size:12.5px;margin:0}
+@media (max-width:640px){.dt{grid-template-columns:minmax(0,1fr)}.dt dt{margin-top:6px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header style="display:grid;gap:6px">
+    <h1>전투 에이전트 출력</h1>
+    <p class="lead">전투 정책(CombatPolicy)은 한 시점마다 행동 하나와, 필요하면 대상 적 하나를 고릅니다. 그 밖의 출력은 학습과 기록에만 쓰입니다.
+      입력은 <code>combat_agent_inputs.html</code> 에 있습니다.</p>
+  </header>
+
+  <div class="summary">
+    <span class="chip a">행동 번호 a (0~31)</span><span class="sep">+</span>
+    <span class="chip t">대상 적 (없으면 −1)</span><span class="sep">→</span>
+    <span>시뮬레이터 <code>step(a, 적 슬롯)</code></span><span class="sep">·</span>
+    <span>함께 내는 것: 그 선택의 log 확률</span>
+  </div>
+
+  <section class="out a">
+    <h2>① 행동 점수 <span class="shape">32칸 · 칸 i = 관측 토큰 1+i</span></h2>
+    <p>행동 토큰마다 [그 토큰의 벡터 ; 전역 토큰의 벡터] 를 작은 MLP 에 넣어 점수 하나를 냅니다. 지금 할 수 없는 칸은 −10⁹ 로 지워서 확률이 0 이 됩니다. softmax 로 확률을 만듭니다.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>화면</th><th>칸</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="3">평소 (내 턴)</td><td class="k">0 ~ H−1</td><td>손패 i 번째 카드를 낸다 (H = 손패 장수, 손패 순서 그대로)</td></tr>
+        <tr><td class="k">H</td><td>턴 종료</td></tr>
+        <tr><td class="k">H+1+s</td><td>포션 칸 s 의 포션을 쓴다 (s = 0~8)</td></tr>
+        <tr><td rowspan="2">카드 고르기 화면</td><td class="k">0 ~ C−1</td><td>후보 i 번째 카드를 고른다 (C = 후보 수, 최대 31)</td></tr>
+        <tr><td class="k">C</td><td>고르지 않기 (건너뛸 수 있는 화면에서만)</td></tr>
+      </tbody>
+    </table></div>
+    <dl class="dt">
+      <dt>학습할 때</dt><dd>확률대로 하나를 뽑습니다. 같은 전투 8번이 서로 다른 행동을 해 보게 됩니다.</dd>
+      <dt>검증할 때</dt><dd>확률이 가장 높은 행동을 고릅니다 (greedy).</dd>
+      <dt>여러 장 고르는 화면</dt><dd>한 번에 한 장만 고릅니다. 시뮬레이터가 다 고를 때까지 화면을 다시 엽니다.</dd>
+    </dl>
+  </section>
+
+  <section class="out t">
+    <h2>② 대상 적 점수 <span class="shape">적 토큰 수만큼</span></h2>
+    <p>고른 행동이 적 하나를 겨누는 카드(대상: 적 하나)나 포션일 때만 냅니다. 고른 행동 토큰을 질의로, 적 토큰들을 열쇠로 써서 적마다 점수를 내고, 죽은 적은 지운 뒤 softmax 합니다.</p>
+    <dl class="dt">
+      <dt>보내는 값</dt><dd>고른 적 토큰의 슬롯 번호. 대상이 필요 없는 행동(방어, 모든 적 공격, 무작위 대상)은 −1.</dd>
+      <dt>고르는 법</dt><dd>학습 때는 확률대로, 검증 때는 가장 높은 적.</dd>
+    </dl>
+  </section>
+
+  <section class="out m">
+    <h2>③ 학습과 기록에 쓰는 출력</h2>
+    <dl class="dt">
+      <dt>log 확률</dt><dd>log P(행동) + log P(대상). 행동할 때 저장해 두었다가 GRPO 업데이트에서 새 확률과의 비율(PPO 식 자르기)에 씁니다. 전투 기록의 "확률 %" 가 이 값입니다.</dd>
+      <dt>엔트로피</dt><dd>행동 확률의 엔트로피. 업데이트 때 조금 보상해서(계수 0.01) 너무 일찍 한 행동으로 굳지 않게 합니다.</dd>
+      <dt>행동 확률 전부</dt><dd>전투 기록의 "확률 높은 행동 3개" 를 만들 때만 다시 계산합니다.</dd>
+      <dt>토큰 벡터</dt><dd>Transformer 가 만든 토큰마다의 128칸 벡터. 대상 점수 계산 안에서만 씁니다.</dd>
+    </dl>
+  </section>
+
+  <section class="missing">
+    <h2>내지 않는 것</h2>
+    <ul>
+      <li><b>상태 가치</b>: "이 상황에서 이길 확률" 이나 "남을 HP" 를 예측하지 않습니다. 점수는 끝까지 싸워 본 결과(이기면 1 + 남은 HP 비율, 지면 준 피해 비율)로만 매깁니다.</li>
+      <li><b>여러 수 앞의 계획</b>: 한 번에 행동 하나만 냅니다. 이번 턴에 무엇을 어떤 순서로 낼지는 매 행동마다 다시 고릅니다.</li>
+      <li><b>행동을 고른 이유</b>: 확률만 있고, 왜 그 행동이 좋은지에 대한 설명 출력은 없습니다.</li>
+    </ul>
+  </section>
+
+  <p class="foot">출처: <code>sts2ai/agents/combat_policy.py</code> (행동·대상 머리, log 확률, 엔트로피), <code>sts2ai/train/grpo.py</code> (뽑기, 업데이트), <code>sts2ai/envs/sts2_adapter.py</code> (행동 번호 → 시뮬레이터). 2026-11-18 기준.</p>
+</div>
+</body>
+</html>

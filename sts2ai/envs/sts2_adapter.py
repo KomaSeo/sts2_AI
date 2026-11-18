@@ -83,6 +83,9 @@ class _Lib:
         self._pile_details = bind("Sts2_GetPileDetails", [ctypes.c_int, ctypes.c_int, ip, ctypes.c_int])
         self._pile_costs = bind("Sts2_GetPileCosts", [ctypes.c_int, ctypes.c_int, ip, ctypes.c_int])
         self._resources = bind("Sts2_GetResources", [ctypes.c_int, ip, ctypes.c_int])
+        # 적 의도마다 때리는 횟수 [주 의도, 함께 하는 의도] × 적 슬롯, 고르기 화면 후보 전부 [(카드 id, 강화)]
+        self._intent_hits = bind("Sts2_GetIntentHits", [ctypes.c_int, ip, ctypes.c_int])
+        self._selection = bind("Sts2_GetSelectionCandidates", [ctypes.c_int, ip, ctypes.c_int])
         self.cards = names.cards()
         # 날개 달린 부츠: 유물 카운터 = 이미 쓴 이동 횟수, 3 번 쓰면 끝 (RunConstants.WingedBootsTravels)
         self.winged_boots = next((rid for rid, n in names.relics().items() if n.replace(" ", "") == "WingedBoots"), None)
@@ -156,6 +159,42 @@ class _Lib:
             tok.feats = feats
         return enchants
 
+    def _fill_selection(self, handle: int, tok) -> None:
+        """고르기 화면 후보 토큰(TYPE_SELECT)을 시뮬레이터가 주는 후보 전부로 채운다.
+        관측은 10 장까지만 카드 정체를 싣고, 11 번째부터는 id 0 이었다."""
+        idx = np.flatnonzero(tok.types == S.TYPE_SELECT)
+        if not len(idx) or self._selection is None:
+            return
+        buf = (ctypes.c_int * (1 + 2 * 64))()
+        n = self._selection(handle, buf, len(buf))
+        if n < 1 or buf[0] <= 0:
+            return
+        ids, feats = tok.ids.copy(), tok.feats.copy()
+        for k, ti in enumerate(idx[: buf[0]]):
+            cid, up = int(buf[1 + 2 * k]), int(buf[2 + 2 * k])
+            if not cid:
+                continue
+            ids[ti] = self.ct.VOCAB.card.get(cid, 0)
+            feats[ti, S.F_UPGRADED] = float(up)
+            info = self.cards.get(cid)
+            feats[ti, S.F_COST] = max(0, info.cost if info else 0) / 5.0
+        tok.ids, tok.feats = ids, feats
+
+    def _fill_intent_hits(self, handle: int, tok) -> None:
+        """적 의도 토큰의 F_MAGNITUDE 에 때리는 횟수/5 를 넣는다 (관측의 의도 수치는 총 피해라 횟수가 없었다)."""
+        if self._intent_hits is None:
+            return
+        buf = (ctypes.c_int * 64)()
+        if self._intent_hits(handle, buf, 64) < 0:
+            return
+        feats = tok.feats.copy()
+        for ty, k in ((S.TYPE_INTENT, 0), (S.TYPE_INTENT_NEXT, 1)):
+            for ti in np.flatnonzero(tok.types == ty):
+                slot = int(tok.owners[ti]) - 1
+                if 0 <= slot < 32:
+                    feats[ti, S.F_MAGNITUDE] = buf[slot * 2 + k] / 5.0
+        tok.feats = feats
+
     def resource_tokens(self, handle: int) -> list[tuple[int, int, dict]]:
         """(토큰 종류, id, 특징) 목록: 골드·최대 에너지·오브 칸·별·오스티, 오브마다 하나. 지원하지 않는 빌드면 빈 목록."""
         if self._resources is None:
@@ -206,8 +245,13 @@ class _Lib:
                 ids[ti] = self.potion_index.get(int(obs[ct.POTION_OFFSET + slot * 2]), 0)
             tok.ids = ids
         enchants = self._fill_cards(handle, tok)
-        # 오브·캐릭터 자원 토큰, 카드 고르기 화면 종류 토큰을 맨 뒤에 붙인다 (행동 토큰 1+i 와 적 토큰 위치는 그대로)
-        extra = self.resource_tokens(handle)
+        self._fill_selection(handle, tok)
+        self._fill_intent_hits(handle, tok)
+        # 오브·캐릭터 자원 토큰, 내 실제 HP·최대 HP, 카드 고르기 화면 종류 토큰을 맨 뒤에 붙인다
+        # (행동 토큰 1+i 와 적 토큰 위치는 그대로)
+        extra = self.resource_tokens(handle) + [
+            (S.TYPE_RESOURCE, S.RESOURCE_HP, {S.F_MAGNITUDE: int(obs[0]) / 100.0}),
+            (S.TYPE_RESOURCE, S.RESOURCE_MAX_HP, {S.F_MAGNITUDE: int(obs[1]) / 100.0})]
         sel_kind = int(obs[ct.SELECTION_KIND_OFFSET])
         if sel_kind:
             extra = extra + [(S.TYPE_SELECTION, min(sel_kind, S.N_SELECTION_KINDS - 1), {})]
@@ -325,7 +369,7 @@ class Sts2RunCombatFork:
 class Sts2Run:
     """RunSim 프로토콜 구현."""
 
-    def __init__(self, repo: str | Path = "../sts2", ascension: int = 0, combat_probe: bool = False,
+    def __init__(self, repo: str | Path = "../sts2", ascension: int = 0, combat_probe: bool = True,
                  combat_fork: str = "run"):
         self.lib = _Lib(repo)
         self.vocab = self.lib.vocab

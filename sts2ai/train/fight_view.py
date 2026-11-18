@@ -94,11 +94,17 @@ def ko_action(s: str, select: str | None = None) -> str:
 
 
 def intent_str(x) -> str:
+    """[종류, 수치, 때리는 횟수]. 공격 수치는 총 피해라서 여러 번 때리면 "공격 24 (8×3)"."""
     if not x:
         return "?"
-    kind, mag = x
+    kind, mag = x[0], x[1]
+    hits = x[2] if len(x) > 2 else 1
     k = ko("intent", kind)
-    return f"{k} {mag}" if mag else k
+    if not mag:
+        return k
+    if kind == "Attack" and hits and hits > 1:
+        return f"{k} {mag} ({mag // hits}×{hits})"
+    return f"{k} {mag}"
 
 
 def enemies_of(s: dict) -> list[dict]:
@@ -111,7 +117,7 @@ def enemies_of(s: dict) -> list[dict]:
 def enemy_str(e: dict) -> str:
     out = f"{ko('monster', e['name'])} HP {e['hp']}" + (f" 방어 {e['block']}" if e.get("block") else "")
     if "intent" in e:
-        out += f" · {intent_str(e['intent'])}" + (f" → 다음 {intent_str(e['next'])}" if e.get("next") else "")
+        out += f" · {intent_str(e['intent'])}" + (f" + {intent_str(e['next'])}" if e.get("next") else "")
     return out
 
 

@@ -224,11 +224,14 @@ def fight_record(policy, run, t: Trajectory, sc: Scenario, top: int = 3) -> dict
             e = {"slot": slot - 1, "name": enemy_names.get(int(o.ids[ti]), f"적{int(o.ids[ti])}"),
                  "hp": int(round(float(o.feats[ti, S.F_ENEMY_HP]) * 50)),
                  "block": int(round(float(o.feats[ti, S.F_ENEMY_BLOCK]) * 50))}
+            # intent = 주 의도, next = 같은 행동에 함께 붙은 의도 (예: 공격 + 약화). 이름은 예전 기록과 맞춘다.
+            # [종류, 수치(공격이면 총 피해), 때리는 횟수]
             for key, ty in (("intent", S.TYPE_INTENT), ("next", S.TYPE_INTENT_NEXT)):
                 k = np.flatnonzero((o.types == ty) & (o.owners == slot))
                 if len(k):
                     j = int(k[0])
-                    e[key] = [intent_names.get(int(o.ids[j]), "?"), int(round(float(o.feats[j, S.F_INTENT_MAG]) * 30))]
+                    e[key] = [intent_names.get(int(o.ids[j]), "?"), int(round(float(o.feats[j, S.F_INTENT_MAG]) * 30)),
+                              int(round(float(o.feats[j, S.F_MAGNITUDE]) * 5))]
             if e["hp"] > 0:
                 out.append(e)
         return out
@@ -248,6 +251,7 @@ def fight_record(policy, run, t: Trajectory, sc: Scenario, top: int = 3) -> dict
             "hp": int(round(float(g[S.F_HP]) * sc.max_hp)),  # 전역 토큰의 HP 칸 = HP / 최대 HP
             "energy": int(round(float(g[S.F_ENERGY]) * 10)),  # 에너지 / 10
             "block": int(round(float(g[S.F_BLOCK]) * 50)),
+            "endturn": [round(float(g[c]) * 15, 1) for c in (14, 15)] + [round(float(g[16]), 2), int(g[17] > 0.5)],
             "select": sel_names.get(int(o.ids[np.flatnonzero(o.types == S.TYPE_SELECTION)[0]]), "?")
             if (o.types == S.TYPE_SELECTION).any() else None,  # 카드 고르기 화면 종류 (CardSelectionKind)
             "enemies": enemies(o),

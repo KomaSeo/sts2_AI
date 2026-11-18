@@ -909,3 +909,30 @@
   - 세 단으로 나눴다: ① 토큰 묶음(전역, 행동, 카드 더미, 유물·버프, 적, 자원, 고르기 종류, RUN) → ② 토큰 하나를 벡터로 만드는 합 → ③ Transformer 와 행동·타깃 머리.
   - 아래에 "들어가지 않는 것"을 모았다: 적 공격 횟수, 실제 HP·최대 HP(비율만 들어감), 턴 번호, 카드 효과 문구, 고르기 화면을 연 카드 등. — [AI 임의 결정]
 - 관련 파일: docs/combat_agent_inputs.html
+
+### 2026-11-18 · 전투 관측: 실제 HP·최대 HP, 적 때리는 횟수, 고르기 후보 전부, 턴 종료 예측 켜기 (v7)
+- 출처: [사용자 지시] / 세부는 [AI 임의 결정]
+- 사용자 원문: "턴 종료 예측 끄지마. 후보가 10장을 넘는 고르기 화면도 보여줘. 당연히 내 HP의 실제 값과 최대 HP 들어가야지. 적이 몇 번 때리는지도 들어가야하고" / "만약 턴 종료시 피해량 예측한다는 거면 그대로 둬"
+- 이유: 이유 미기재.
+- 내용
+  - 턴 종료 예측
+    - Sts2Run 의 combat_probe 기본값을 True 로 바꿨다. 지금 턴을 끝내면 잃을 HP 의 평균·최악, 죽을 확률을 숨은 난수를 새로 뽑은 복제 5 번으로 잰다.
+    - "그대로 둬" 는 처음 지시("끄지마")대로 켜 두라는 뜻으로 읽었다. — [AI 임의 결정] (해석)
+  - 실제 HP·최대 HP
+    - 자원 토큰 두 개를 붙인다: RESOURCE_HP(6), RESOURCE_MAX_HP(7), 값/100.
+    - 자원 종류 칸(8)이 남아 있어서 임베딩 크기는 그대로다.
+  - 적 때리는 횟수
+    - 시뮬레이터에 Sts2_GetIntentHits 를 넣었다. 적 의도 토큰의 F_MAGNITUDE 에 횟수/5 를 넣는다.
+    - 확인해 보니 관측의 공격 수치는 한 번 피해가 아니라 총 피해(한 번 피해 × 횟수)였다. 그림과 보기 페이지를 고쳤다.
+  - 고르기 후보 전부
+    - 시뮬레이터에 Sts2_GetSelectionCandidates 를 넣었다. TYPE_SELECT 토큰을 후보 전부(최대 31)로 채운다.
+    - 확인: 후보 20 장 화면에서 모르는 카드 0 장.
+  - 함께 붙은 의도 (사용자 질문 "만약에 적이 공격과 약화가 같이 들어가면 어떻게 되냐?" 에서 확인)
+    - 시뮬레이터의 SecondaryIntent 는 다음 턴 행동이 아니라 같은 행동의 두 번째 의도다 (예: 오물팽이 OIL_SPRAY = 공격 8 + 약화 1).
+    - 기록·보기에서 "다음" 을 "+" 로 바꿨다 (예: "공격 8 + 약화 1"). 기록의 키 이름(next)은 예전 기록과 맞추려고 그대로 두었다.
+  - 기록: 적 의도에 때리는 횟수를 남긴다. 보기에서는 "공격 24 (8×3)" 처럼 보인다. 행동마다 턴 종료 예측 값도 남긴다.
+  - 문서
+    - docs/combat_agent_inputs.html 을 고쳤다.
+    - docs/combat_agent_outputs.html 을 새로 만들었다 (사용자 원문: "전투 agent의 output도 모두 나열해서 docs로 만들어").
+  - 학습: runs/combat_only_v6 을 끊고 runs/combat_only_v7 에서 처음부터 다시 학습한다.
+- 관련 파일: sts2ai/schema.py, sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, sts2ai/train/fight_view.py, docs/combat_agent_inputs.html, docs/combat_agent_outputs.html, 저장소 밖 (../sts2/src/Sts2Emulator/Interop/NativeExports.cs, ../sts2/out)
