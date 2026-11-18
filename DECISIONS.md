@@ -1149,3 +1149,19 @@
     - 시뮬레이터가 있을 때만 도는 테스트를 넣었다.
   - 학습: runs/combat_only_v13 을 반복 19 에서 끊고 runs/combat_only_v14 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/train/relic_cards.py, sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py, tests/test_combat_only.py
+
+### 2026-11-19 · 덱 구성: 5 장 채우기 없앰, 특수 카드 0~3, 저주 0~3, 발톱 0~6 장 (v15)
+- 출처: [사용자 지시]
+- 사용자 원문: "시작 카드와 추가 카드 합쳐서 5장 안되어도 상관없어. 더 뽑지마 / 3번이벤트 등급은 0~3장으로 줄이자. / 5번의 저주는 0~3장으로 바꾸자 / 발톱은 여러 장 변화시키는 건데 어떻게 하지?" / (발톱) "장수는 0~6 무작위, 타격·수비부터"
+- 이유: 이유 미기재.
+- 내용
+  - min_playable 기본값을 5 → 0 으로 바꿨다. 시작+추가 카드가 5 장 아래여도 채우지 않는다.
+    - 빈 덱·저주만 있는 덱도 전투는 시작된다 (확인). 질 뿐이다.
+  - 특수 카드(이벤트 등급): 0~5 → 0~3 장. 실행 설정 --special-max 3 으로 넣었다. 기본값(special_max = 0)은 그대로다.
+  - 저주: 0~6 → 0~3 장. curses_max 기본값을 3 으로 바꿨다.
+  - 발톱
+    - 바꾸는 장수를 0~6 고르게 뽑는다 (확인: 700 번에 0~6 이 각 82~115 번).
+    - 고르는 순서는 예전과 같다: 타격·수비부터, 모자라면 저주 아닌 카드 무작위.
+  - 테스트: 5 장 채우기 테스트는 min_playable = 5 를 명시해 남겼다. 기본값에서 채우지 않는지와 저주 3 장 이하를 보는 테스트를 넣었다 (11 개 통과).
+  - 학습: runs/combat_only_v14 를 반복 7 에서 끊고 runs/combat_only_v15 에서 처음부터 다시 학습한다.
+- 관련 파일: sts2ai/train/combat_only.py, sts2ai/train/relic_cards.py, tests/test_combat_only.py

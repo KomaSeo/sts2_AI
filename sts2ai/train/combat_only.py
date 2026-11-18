@@ -54,8 +54,8 @@ class CombatConfig:
     deck_scheme: str = "uniform"
     extra_per_act: int = 9
     curses_min: int = 0
-    curses_max: int = 6
-    min_playable: int = 5  # "acts" 에서 저주 아닌 카드가 이보다 적으면 풀에서 채운다 (빈 덱 방지)
+    curses_max: int = 3
+    min_playable: int = 0  # "acts" 에서 시작+추가 카드가 이보다 적으면 풀에서 채운다. 0 = 채우지 않음 (빈 덱도 그대로)
     # 특수 카드(어느 카드 목록에도 없는 이벤트·고대 등급 카드) 1 장을 넣을 확률 ("acts" 에서만). 이벤트로 얻는 카드를 흉내 낸다
     special_prob: float = 0.0
     # special_max > 0 이면 확률 대신 special_min~special_max 장을 고르게 (겹침 허용)

@@ -91,12 +91,13 @@ class RelicCards:
                         touched = True
                         break
             if name == "Claws" and self.maul is not None:
-                # 덱에서 6 장을 골라 할퀴기로 바꾼다. 사람처럼 타격·수비부터, 모자라면 저주 아닌 카드 중 무작위.
-                # (게임은 원래 카드가 강화돼 있으면 할퀴기도 강화한다)
+                # 게임: 덱에서 최대 6 장을 골라 할퀴기로 바꾼다. 몇 장 바꿀지는 0~6 고르게 뽑고, 바꿀 카드는 사람처럼
+                # 타격·수비부터, 모자라면 저주 아닌 카드 중 무작위 (게임은 원래 카드가 강화돼 있으면 할퀴기도 강화한다)
+                n_claw = int(rng.integers(0, 7))
                 first = [i for i, (c, _) in enumerate(deck) if c in self.starters]
                 rest = [i for i, (c, _) in enumerate(deck) if c not in self.starters and not self._is_curse(c)]
                 rng.shuffle(rest)
-                for i in (first + rest)[:6]:
+                for i in (first + rest)[:n_claw]:
                     deck[i] = (self.maul, deck[i][1])
                     touched = True
             if name == "PreservedFog":

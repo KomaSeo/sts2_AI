@@ -88,7 +88,7 @@ def test_act_relics_follow_ancients():
 def test_act_deck_sizes_and_curses():
     from sts2ai.train.combat_only import sample_scenario
 
-    cfg = CombatConfig(deck_scheme="acts")
+    cfg = CombatConfig(deck_scheme="acts", min_playable=5, curses_max=6)
     starters = [(10, 0, 5), (11, 0, 5), (12, 0, 1)]
     rng = np.random.default_rng(3)
     for sim_act, act in ((1, 1), (3, 2), (4, 3)):
@@ -157,3 +157,18 @@ def test_relic_cards_with_simulator():
     assert mh == 71 and hp == 71
     P = co.scenario_pools(r, CombatConfig(relic_cards=True))
     assert not (set(P["cards"]) | set(P["curses"]) | set(P["specials"])) & rc.reserved
+
+
+def test_act_deck_no_top_up_by_default():
+    from sts2ai.train.combat_only import sample_scenario
+
+    cfg = CombatConfig(deck_scheme="acts")
+    rng = np.random.default_rng(8)
+    sizes, curses = [], []
+    for _ in range(3000):
+        sc = sample_scenario(rng, cfg, [1, 2, 3], [7], (5, 1, "Weak"), starters=[(10, 0, 5)], curses=[90])
+        ids = [c for c, _ in sc.deck]
+        sizes.append(len(ids) - ids.count(90))
+        curses.append(ids.count(90))
+    assert min(sizes) < 5  # 5 장 미만도 그대로 둔다
+    assert max(curses) <= 3
