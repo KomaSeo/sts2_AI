@@ -1188,3 +1188,19 @@
     - 칸 계산 테스트를 넣었다 (12 개 통과).
   - 학습: runs/combat_only_v15 를 반복 21 에서 끊고 runs/combat_only_v16 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, sts2ai/train/fight_view.py, tests/test_combat_only.py
+
+### 2026-11-19 · 병 속의 요정을 손으로 쓰지 못하게 (시뮬레이터 수정, v17)
+- 출처: [사용자 지시] / 고친 자리는 [AI 임의 결정]
+- 사용자 원문: "???병 속의 요정을 사용할 수가 있어?"
+- 이유: 이유 미기재.
+- 내용
+  - 게임의 병 속의 요정은 자동 포션이다 (Usage.Automatic, 죽을 때 저절로 발동).
+    - 시뮬레이터는 효과 쪽(PotionEffects case 22)은 아무것도 하지 않게 해 두었다.
+    - 그런데 할 수 있는 행동 목록(CombatEngine.ValidActions)은 칸에 든 포션을 모두 쓸 수 있게 내놨다.
+    - 그래서 정책이 요정을 "써서" 칸만 비우고 죽음 구제를 잃을 수 있었다 (v2 반복 2 기록에 실제로 있었다).
+  - 고친 것: ValidActions 에서 병 속의 요정을 뺐다. 시뮬레이터 주석상 자동 포션은 이것 하나다.
+  - 확인
+    - 요정 + 화염 포션이 있으면 쓸 수 있는 포션 행동은 화염 포션뿐이다.
+    - HP 5 로 보스전에서 턴을 넘기면 HP 0 → 요정이 최대 HP 의 30%(24)로 살리고 요정이 사라진다.
+  - 학습: runs/combat_only_v16 을 반복 22 에서 끊고 runs/combat_only_v17 에서 처음부터 다시 학습한다 (설정은 v16 과 같다).
+- 관련 파일: 저장소 밖 (../sts2/src/Sts2Emulator/Core/CombatEngine.cs, ../sts2/out)
