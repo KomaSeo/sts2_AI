@@ -991,3 +991,27 @@
     - 온도 2(정책 점수 ÷ 2) 500 번, 완전 무작위 행동 500 번. — 나누는 비율은 [AI 임의 결정]
   - 정책 가중치는 실행할 때의 combat_policy.pt 다. 학습이 계속 돌아서 upper_bound 때보다 조금 뒤의 가중치다.
 - 관련 파일: scripts/unwinnable_check.py
+
+### 2026-11-18 · 전투 정책 11M 으로 키우기, 엔트로피 하한, GPU 추론 서버·bf16 (v8)
+- 출처: [사용자 지시] / 세부는 [AI 임의 결정]
+- 사용자 원문: "11M로 바꿔보자" / "그리고 혹시 엔트로피 하한을 둘 수 있나?" / "만약 완료되면 지금 돌리고 있는 3레이어 짜리는 저장만 해두고 그만 돌리도록 해."
+- 이유
+  - 크기: 사용자가 밝힌 이유 없음. 앞선 대화에서 128·3층이 작다는 이야기가 있었다.
+  - 하한: 이유 미기재. 앞선 실험에서 정책 엔트로피가 줄며 온도를 높여야만 이기는 보스 전투가 있었다.
+- 내용
+  - 크기: d 384, 6 층, 머리 6, 피드포워드 4× = 11,976,961 개 (예전 676,993 개).
+    - CombatPolicy, CombatEncoder, set_transformer 에 heads·ff_mult 를 넣었다.
+    - 기본값은 예전 크기라 예전 가중치·설정은 그대로 읽는다.
+  - 엔트로피 하한 — 값은 [AI 임의 결정]
+    - 행동이 2 개 이상인 스텝마다 H/log(행동 수) 가 0.3 아래면 1.0 × (0.3 − H/log K) 를 손실에 더한다. 덱 빌딩의 deck_ent_floor 와 같은 방식이다.
+    - 0.3 을 고른 근거: v7(115 반복) 의 정규화 엔트로피는 중앙값 0.43 이고, 0.3 아래 스텝이 37% (0 근처 10%) 였다.
+    - 기록: ent_norm, below_floor.
+  - 속도 — [AI 임의 결정]
+    - 큰 모델은 CPU 워커에서 계산하기 어렵다. 워커의 정책 호출을 GPU 추론 서버(런 학습에 있던 것)로 모은다. 서버가 전투 정책만 그 크기로 만들게 고쳤다.
+    - 첫 시험에서는 반복 반(624 전투)이 412 초 걸렸다. GPU 사용률은 100% 였는데 업데이트만 따로 재면 40 초라서, VRAM(8 GB) 이 모자라 시스템 메모리로 넘친 것으로 봤다.
+    - 업데이트를 bf16 으로 바꿨다 (속도 2 배, 최대 메모리 3.8 → 2.3 GB). 서버 묶음 크기를 256 으로 줄였다.
+    - 그 뒤 반복 반이 38~44 초다. 전체 반복은 약 80 초다.
+  - 학습
+    - runs/combat_only_v7 은 반복 115 에서 저장해 두고 멈췄다 (checkpoint.pt, policy_it0110.pt).
+    - runs/combat_only_v8 에서 11M 으로 처음부터 학습한다. 나머지 설정은 v7 과 같다.
+- 관련 파일: sts2ai/encoders/embeddings.py, sts2ai/encoders/combat.py, sts2ai/agents/combat_policy.py, sts2ai/train/infer_server.py, sts2ai/train/grpo.py, sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py

@@ -40,10 +40,10 @@ class SharedEmbeddings(nn.Module):
         return v
 
 
-def set_transformer(d: int, layers: int, heads: int = 4) -> nn.TransformerEncoder:
-    """위치 인코딩 없는 Transformer = 순서를 모르는 집합 인코더."""
+def set_transformer(d: int, layers: int, heads: int = 4, ff_mult: int = 2) -> nn.TransformerEncoder:
+    """위치 인코딩 없는 Transformer = 순서를 모르는 집합 인코더. ff_mult = 피드포워드 폭 / d."""
     layer = nn.TransformerEncoderLayer(
-        d, heads, dim_feedforward=2 * d, dropout=0.0, batch_first=True, norm_first=True
+        d, heads, dim_feedforward=ff_mult * d, dropout=0.0, batch_first=True, norm_first=True
     )
     return nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
 

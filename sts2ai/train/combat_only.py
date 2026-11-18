@@ -59,8 +59,16 @@ class CombatConfig:
     max_steps: int = 300
     d_model: int = 128
     layers: int = 3
+    heads: int = 4  # attention 머리 수 (d_model 을 나눠떨어지게)
+    ff_mult: int = 2  # Transformer 피드포워드 폭 = ff_mult × d_model
+    infer_server: bool = False  # 워커의 정책 호출을 GPU 추론 서버 하나에 모은다 (큰 모델용)
+    server_max_batch: int = 256  # 추론 서버가 한 번에 모으는 관측 수 (클수록 GPU 메모리를 더 쓴다)
+    amp: bool = False  # 학습 업데이트를 GPU 에서 bf16 으로 (큰 모델용, 약 2 배 빠르고 메모리 40% 적게)
     lr_policy: float = 3e-4
     grpo_epochs: int = 2
+    # 엔트로피 하한: 행동이 2 개 이상인 스텝마다 H/log(행동 수) 가 이 값 아래로 가면 벌점 (0 = 끔)
+    ent_floor: float = 0.0
+    ent_floor_coef: float = 1.0
     advantage_mode: str = "zscore"
     eval_every: int = 10  # 반복 N 번마다(그리고 시작 전) 고정 검증 시나리오를 greedy 로
     eval_rounds: int = 2  # 검증 시나리오 = (조우, 막) 전체 × 이 값
@@ -320,26 +328,41 @@ def fight_text(rec: dict) -> str:
 _W: dict = {}
 
 
-def _init_worker(repo: str, cfg: CombatConfig) -> None:
+def make_policy(vocab, cfg) -> CombatPolicy:
+    """설정 크기의 전투 정책. 예전 설정 파일(heads·ff_mult 없음)은 예전 크기(4, 2)로."""
+    return CombatPolicy(SharedEmbeddings(vocab, cfg.d_model), layers=cfg.layers,
+                        heads=getattr(cfg, "heads", 4), ff_mult=getattr(cfg, "ff_mult", 2))
+
+
+def _init_worker(repo: str, cfg: CombatConfig, server_args=None) -> None:
     from ..envs.sts2_adapter import Sts2Run  # noqa: PLC0415
 
     torch.set_num_threads(1)
     run = Sts2Run(repo)
     run.reset(12345)
-    policy = CombatPolicy(SharedEmbeddings(run.vocab, cfg.d_model), layers=cfg.layers)
-    policy.eval()
-    _W.update(run=run, policy=policy, cfg=cfg, version=-1)
+    actor = None
+    if server_args is not None:  # 정책 계산은 추론 서버가 한다 (가중치도 서버만 가진다)
+        from .infer_server import RemoteActor  # noqa: PLC0415
+
+        req_q, resp_qs, id_q = server_args
+        wid = id_q.get()
+        actor = RemoteActor(wid, req_q, resp_qs[wid])
+        policy = None
+    else:
+        policy = make_policy(run.vocab, cfg)
+        policy.eval()
+    _W.update(run=run, policy=policy, actor=actor, cfg=cfg, version=-1)
 
 
 def _work(task):
     version, blob, scs, greedy, seed = task
-    if _W["version"] != version:
+    if _W["actor"] is None and _W["version"] != version:
         _W["policy"].load_state_dict(torch.load(io.BytesIO(blob), map_location="cpu"))
         _W["version"] = version
     torch.manual_seed(seed)
     cfg = _W["cfg"]
     with torch.no_grad():
-        return play_scenarios(_W["policy"], _W["run"], scs, cfg.group_size, greedy, cfg.max_steps)
+        return play_scenarios(_W["actor"] or _W["policy"], _W["run"], scs, cfg.group_size, greedy, cfg.max_steps)
 
 
 def _blob(policy) -> bytes:
@@ -349,15 +372,27 @@ def _blob(policy) -> bytes:
 
 
 class Runner:
-    def __init__(self, repo: str, cfg: CombatConfig, run):
+    def __init__(self, repo: str, cfg: CombatConfig, run, device: str = "cuda"):
         self.cfg, self.run, self.pool, self.version, self.blob = cfg, run, None, 0, b""
+        self.server = None
         if cfg.workers > 0:
+            server_args = None
+            if getattr(cfg, "infer_server", False):
+                from .infer_server import InferenceServer  # noqa: PLC0415
+
+                self.server = InferenceServer(run.vocab, cfg.d_model, device, cfg.workers,
+                                              max_batch=getattr(cfg, "server_max_batch", 256),
+                                              policy_kwargs={"layers": cfg.layers, "heads": cfg.heads,
+                                                             "ff_mult": cfg.ff_mult})
+                server_args = self.server.worker_args()
             self.pool = mp.get_context("spawn").Pool(cfg.workers, initializer=_init_worker,
-                                                     initargs=(repo, cfg))
+                                                     initargs=(repo, cfg, server_args))
 
     def sync(self, policy) -> None:
         self.version += 1
         self.blob = _blob(policy)
+        if self.server is not None:
+            self.server.load(self.blob)
 
     def play(self, policy, scs: list[Scenario], greedy: bool, rng: np.random.Generator) -> list[list[Trajectory]]:
         k = self.cfg.scenarios_per_task
@@ -378,6 +413,8 @@ class Runner:
         if self.pool is not None:
             self.pool.close()
             self.pool.join()
+        if self.server is not None:
+            self.server.close()
 
 
 def _save(obj, path: Path) -> None:
@@ -416,7 +453,7 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
     cards, pots, relic_pool = card_pool(run), potion_pool(run), run.relic_pool()
     starters = parse_starters(cfg.starter_cards, {info.name: cid for cid, info in run.lib.cards.items()})
     device = resolve_device(cfg.device)
-    policy = CombatPolicy(SharedEmbeddings(run.vocab, cfg.d_model), layers=cfg.layers).to(device)
+    policy = make_policy(run.vocab, cfg).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr_policy)
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -446,9 +483,8 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
             rng = np.random.default_rng(cfg.seed + 7919 * start)
         log(f"이어서 학습: 반복 {start} 부터")
     (out / "fights").mkdir(exist_ok=True)
-    runner = Runner(repo, cfg, run)
-    cpu_policy = policy if device.type == "cpu" else CombatPolicy(SharedEmbeddings(run.vocab, cfg.d_model),
-                                                                  layers=cfg.layers)
+    runner = Runner(repo, cfg, run, device=str(device))
+    cpu_policy = policy if device.type == "cpu" else make_policy(run.vocab, cfg)
 
     def actor():
         if cpu_policy is not policy:
@@ -515,7 +551,8 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
             except Exception as exc:  # noqa: BLE001
                 log(f"  fights.html 을 쓰지 못했다: {exc!r}")
             policy.train()
-            row.update(grpo_update(policy, opt, [g for g in groups if len(g) > 1], epochs=cfg.grpo_epochs))
+            row.update(grpo_update(policy, opt, [g for g in groups if len(g) > 1], epochs=cfg.grpo_epochs,
+                                   ent_floor=cfg.ent_floor, ent_floor_coef=cfg.ent_floor_coef, amp=cfg.amp))
             runner.sync(policy)
             if cfg.eval_every and ((it + 1) % cfg.eval_every == 0 or it + 1 == cfg.iterations):
                 evaluate(row)

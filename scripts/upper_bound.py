@@ -50,7 +50,7 @@ def main() -> None:
     eval_set = [co.sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool, starters)
                 for _ in range(cfg.eval_rounds) for e in pool]
 
-    policy = CombatPolicy(SharedEmbeddings(run.vocab, cfg.d_model), layers=cfg.layers)
+    policy = co.make_policy(run.vocab, cfg)
     policy.load_state_dict(torch.load(folder / "combat_policy.pt", map_location="cpu"))
     policy.eval()
 

@@ -18,7 +18,7 @@ MAX_OWNERS = 9
 
 
 class CombatEncoder(nn.Module):
-    def __init__(self, emb: SharedEmbeddings, layers: int = 3, heads: int = 4):
+    def __init__(self, emb: SharedEmbeddings, layers: int = 3, heads: int = 4, ff_mult: int = 2):
         super().__init__()
         d = emb.d
         self.emb = emb
@@ -30,7 +30,7 @@ class CombatEncoder(nn.Module):
         self.selection = nn.Embedding(S.N_SELECTION_KINDS, d, padding_idx=0)  # 카드 고르기 화면 종류
         self.feat = nn.Linear(S.N_COMBAT_FEATURES, d)
         self.run_proj = nn.Linear(d, d)
-        self.body = set_transformer(d, layers, heads)
+        self.body = set_transformer(d, layers, heads, ff_mult)
         self.out = nn.LayerNorm(d)
 
     def _id_embedding(self, types: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:

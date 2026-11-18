@@ -331,8 +331,14 @@ def grpo_update(
     minibatch: int = 256,
     run_vec_fn=None,
     params=None,
+    ent_floor: float = 0.0,
+    ent_floor_coef: float = 1.0,
+    amp: bool = False,
 ) -> dict:
     """PPO 식 clipped objective. 각 시행 안에서는 스텝 평균, 그다음 시행들 평균 (GRPO).
+
+    엔트로피 하한 (ent_floor > 0): 할 수 있는 행동이 2 개 이상인 스텝마다 H / log(행동 수) 가 ent_floor 아래면
+    ent_floor_coef × (ent_floor − H/log K) 를 손실에 더한다 (덱 빌딩 모듈의 deck_ent_floor 와 같은 방식).
 
     run_vec_fn(states) 를 주면 저장해 둔 run_vec 대신 전투 시작 상태에서 run_vec 을 기울기와 함께
     다시 계산한다 (정책 손실이 평가기 트렁크까지 흘러간다). params 는 기울기를 자를 파라미터 목록.
@@ -349,7 +355,7 @@ def grpo_update(
                 steps.append((o, a, tg, lp, t.advantage, w, t.run_vec, t.run_state))
     if not steps:
         return {"grpo_steps": 0}
-    stats = {"loss": 0.0, "entropy": 0.0, "clip_frac": 0.0}
+    stats = {"loss": 0.0, "entropy": 0.0, "clip_frac": 0.0, "ent_norm": 0.0, "below_floor": 0.0}
     n_batches = 0
     dev = module_device(policy)
     for _ in range(epochs):
@@ -375,10 +381,21 @@ def grpo_update(
                 rv = vecs[torch.tensor([uniq[id(c[7])] for c in chunk], device=vecs.device)]
             else:
                 rv = torch.stack([torch.as_tensor(r) for r in rvs]).to(dev) if rvs[0] is not None else None
-            lp, ent = policy.log_prob(batch, a, tg, rv)
+            # amp: GPU 에서 bf16 으로 계산 (큰 모델용, 손실·확률은 float 로 되돌린다)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp and dev.type == "cuda"):
+                lp, ent = policy.log_prob(batch, a, tg, rv)
+            lp, ent = lp.float(), ent.float()
             ratio = (lp - old).exp()
             obj = torch.min(ratio * adv, ratio.clamp(1 - clip, 1 + clip) * adv)
             loss = -(obj * w).sum() / n_traj - ent_coef * (ent * w).sum() / n_traj
+            k = batch["legal"].sum(-1).float()
+            multi = k > 1
+            hn = torch.where(multi, ent / torch.log(k.clamp(min=2)), torch.ones_like(ent))
+            if ent_floor > 0 and multi.any():
+                loss = loss + ent_floor_coef * torch.relu(ent_floor - hn[multi]).mean()
+            if multi.any():
+                stats["ent_norm"] += float(hn[multi].mean().detach())
+                stats["below_floor"] += float((hn[multi] < ent_floor).float().mean()) if ent_floor > 0 else 0.0
             optim.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(list(params) if params is not None else policy.parameters(), 1.0)

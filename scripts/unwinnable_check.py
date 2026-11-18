@@ -83,7 +83,7 @@ def _init(repo, cfg, blob):
     torch.set_num_threads(1)
     run = Sts2Run(repo)
     run.reset(12345)
-    pol = CombatPolicy(SharedEmbeddings(run.vocab, cfg.d_model), layers=cfg.layers)
+    pol = co.make_policy(run.vocab, cfg)
     pol.load_state_dict(torch.load(io.BytesIO(blob), map_location="cpu"))
     pol.eval()
     _W.update(run=run, policy=pol)

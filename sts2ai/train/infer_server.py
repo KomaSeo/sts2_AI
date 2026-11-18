@@ -140,13 +140,23 @@ class GraphedPolicy:
         return al[:n], tl[:n, :, :E0]
 
 
-def _serve(vocab, d_model: int, device: str, req_q, resp_qs, ctrl, max_batch: int, max_wait: float) -> None:
+def _serve(vocab, d_model: int, device: str, req_q, resp_qs, ctrl, max_batch: int, max_wait: float,
+           policy_kwargs: dict | None = None) -> None:
+    """policy_kwargs 가 있으면 전투 정책 하나만 그 크기(layers, heads, ff_mult)로 만들고, 가중치도 정책 것만 받는다
+    (전투만 학습). 없으면 예전처럼 Agent 전체의 가중치를 받는다 (런 학습)."""
     from .loop import Agent  # noqa: PLC0415 (spawn 프로세스 안에서 불러온다)
 
     torch.set_num_threads(1)
     dev = torch.device(device)
-    agent = Agent(vocab, d_model)
-    policy = agent.policy.to(dev).eval()
+    if policy_kwargs is not None:
+        from ..agents import CombatPolicy  # noqa: PLC0415
+        from ..encoders import SharedEmbeddings  # noqa: PLC0415
+
+        agent = None
+        policy = CombatPolicy(SharedEmbeddings(vocab, d_model), **policy_kwargs).to(dev).eval()
+    else:
+        agent = Agent(vocab, d_model)
+        policy = agent.policy.to(dev).eval()
     graphed = None
     if dev.type == "cuda":
         torch.backends.mha.set_fastpath_enabled(False)  # Transformer 빠른 경로는 그래프로 녹화되지 않는다
@@ -159,7 +169,8 @@ def _serve(vocab, d_model: int, device: str, req_q, resp_qs, ctrl, max_batch: in
                 return
             if msg[0] == "weights":
                 # 같은 메모리에 복사된다 (녹화한 그래프가 새 가중치를 그대로 쓴다)
-                agent.load_state_dict(torch.load(io.BytesIO(msg[1]), map_location="cpu"))
+                sd = torch.load(io.BytesIO(msg[1]), map_location="cpu")
+                (policy if agent is None else agent).load_state_dict(sd)
                 ctrl.send(("ok",))
             elif msg[0] == "stats":
                 ctrl.send(("stats", dict(stats)))
@@ -219,7 +230,7 @@ class InferenceServer:
     """학습 루프 쪽에서 서버 프로세스를 띄우고 가중치를 보낸다. 워커에게는 handles(i) 를 넘긴다."""
 
     def __init__(self, vocab, d_model: int, device: str, n_workers: int, max_batch: int = 512,
-                 max_wait: float = 0.002):
+                 max_wait: float = 0.002, policy_kwargs: dict | None = None):
         ctx = mp.get_context("spawn")
         self.req_q = ctx.Queue()
         self.resp_qs = [ctx.Queue() for _ in range(n_workers)]
@@ -228,7 +239,8 @@ class InferenceServer:
             self.id_q.put(i)
         self._ctrl, child = ctx.Pipe()
         self.proc = ctx.Process(target=_serve, daemon=True,
-                                args=(vocab, d_model, device, self.req_q, self.resp_qs, child, max_batch, max_wait))
+                                args=(vocab, d_model, device, self.req_q, self.resp_qs, child, max_batch, max_wait,
+                                      policy_kwargs))
         self.proc.start()
 
     def worker_args(self):
