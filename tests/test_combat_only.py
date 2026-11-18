@@ -66,3 +66,20 @@ def test_fight_text_and_view_accept_new_intents():
     assert "Attack 24 (8x3)" in txt and "+[Debuff 1]" in txt
     md = to_md(0, [rec])
     assert "(8×3)" in md
+
+
+def test_act_relics_follow_ancients():
+    from sts2ai.train.combat_only import sample_act_relics
+
+    anc = {"neow": [1, 2], 2: [10, 11], 3: [20, 21]}
+    pool = list(range(1, 200))
+    rng = np.random.default_rng(0)
+    for act in (1, 2, 3):
+        for _ in range(200):
+            r = sample_act_relics(rng, act, pool, anc, 12)
+            assert len(set(r)) == len(r)
+            assert sum(x in (1, 2) for x in r) == 1
+            assert sum(x in (10, 11) for x in r) == (1 if act >= 2 else 0)
+            assert sum(x in (20, 21) for x in r) == (1 if act >= 3 else 0)
+            rest = [x for x in r if x not in (1, 2, 10, 11, 20, 21)]
+            assert len(rest) <= 12 * act

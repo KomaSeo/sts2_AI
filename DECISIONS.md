@@ -1015,3 +1015,25 @@
     - runs/combat_only_v7 은 반복 115 에서 저장해 두고 멈췄다 (checkpoint.pt, policy_it0110.pt).
     - runs/combat_only_v8 에서 11M 으로 처음부터 학습한다. 나머지 설정은 v7 과 같다.
 - 관련 파일: sts2ai/encoders/embeddings.py, sts2ai/encoders/combat.py, sts2ai/agents/combat_policy.py, sts2ai/train/infer_server.py, sts2ai/train/grpo.py, sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py
+
+### 2026-11-18 · 전투만 학습: 막을 따라가는 유물 고르기 (니오우·고대의 존재) (v9)
+- 출처: [사용자 지시] / 세부는 [AI 임의 결정]
+- 사용자 원문: "유물 선정을 다음과 같이 할 수 있나? 1막의 적일 경우 니오우 유물 1개 + 무작위 유물 0~12개 / 2막의 적일 경우 위의 선정 과정 + 2막에서 나올 수 있는 고대의 존재 유물 1개 + 무작위 유물 0~12개 / 3막의 적일 경우 위의 선정 과정 + 3막에서 나올 수 있는 고대의 존재 유물 1개 + 무작위 유물 0~12개"
+- 이유: 이유 미기재.
+- 내용
+  - 유물 목록은 시뮬레이터 RunConstants.cs 의 목록을 읽는다 (Sts2Run.ancient_relic_pools).
+    - 니오우 27 개: NeowPositiveOptions + NeowPairedOptions + NeowCurseOptions.
+    - 2 막 36 개: 오로바스·파엘(조건부 포함)·테즈카타라 + 다르브(2·3 막 공용, 2 막 전용 2 개 포함).
+    - 3 막 39 개: 노누페이프·탱크스·바쿠(조건부 포함) + 다르브(3 막 전용 2 개 포함).
+    - 다르브(DARV)를 넣은 것과 조건부 유물을 넣은 것은 [AI 임의 결정]. 다르브는 RunMapGenerator 의 공용 고대의 존재라 2·3 막 어디서나 나올 수 있다.
+  - 막 번호: 시뮬레이터 막 1(과성장)·2(지하 선착장) = 1 막, 3(군락) = 2 막, 4(영광) = 3 막.
+  - 고르기
+    - 막 1 부터 적의 막까지 차례로: 그 막의 니오우/고대의 존재 유물 1 개(고르게, 이미 고른 것 제외) + 무작위 0~12 개.
+    - 무작위 유물은 니오우·고대의 존재 유물을 뺀 풀(169 개)에서 겹치지 않게 뽑는다. 그래야 고대의 존재 유물 수가 정확하다. — [AI 임의 결정]
+    - 그래서 유물 수는 1 막 1~13, 2 막 2~26, 3 막 3~39 개다.
+  - 설정: relic_scheme = "acts", relics_per_act = 12. 예전 방식(relic_scheme = "uniform", 0~40)은 기본값으로 남겼다.
+  - 확인
+    - 고대의 존재 유물 95 개를 하나씩 넣은 전투, 새 방식 시나리오 40 개를 무작위 행동으로 돌렸다. 오류는 없었다.
+    - 회귀 테스트를 넣었다.
+  - 학습: runs/combat_only_v8 (11M) 을 반복 6 에서 끊고, 같은 설정 + 이 유물 방식으로 runs/combat_only_v9 에서 처음부터 다시 학습한다.
+- 관련 파일: sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py, tests/test_combat_only.py

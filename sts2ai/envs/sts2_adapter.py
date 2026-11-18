@@ -605,6 +605,46 @@ class Sts2Run:
             self.lib._relic_pool = pool
         return pool
 
+    def ancient_relic_pools(self) -> dict:
+        """니오우·고대의 존재가 줄 수 있는 유물 (시뮬레이터 RunConstants.cs 의 목록을 읽는다).
+
+        {"neow": [...], 2: [2 막 고대의 존재], 3: [3 막 고대의 존재]}. 막 번호는 우리 쪽 1~3 막.
+        - 니오우: 좋은 것(NeowPositiveOptions) + 둘 중 하나로 주는 것(NeowPairedOptions) + 저주가 딸린 것(NeowCurseOptions).
+        - 2 막: 오로바스·파엘(조건부 포함)·테즈카타라 + 다르브(2·3 막 공용, 2 막 전용 2 개 포함).
+        - 3 막: 노누페이프·탱크스·바쿠(조건부 포함) + 다르브(3 막 전용 2 개 포함).
+        """
+        pools = getattr(self.lib, "_ancient_pools", None)
+        if pools is not None:
+            return pools
+        import re  # noqa: PLC0415
+
+        text = (self.lib.repo / "src" / "Sts2Emulator" / "Core" / "Run" / "RunConstants.cs").read_text(encoding="utf-8")
+
+        def arr(name):
+            m = re.search(rf"{name}\s*=>\s*\[([^\]]*)\]", text)
+            if m is None:
+                raise RuntimeError(f"RunConstants.cs 에 {name} 이 없다")
+            return [int(x) for x in re.findall(r"\d+", re.sub(r"//[^\n]*", "", m.group(1)))]
+
+        def const(name):
+            return int(re.search(rf"const int {name}\s*=\s*(\d+)", text).group(1))
+
+        darv = arr("DarvSingleRelicSets")
+        act2 = (arr("OrobasPool1") + arr("OrobasPool2") + arr("OrobasPool3")
+                + arr("PaelPool1") + arr("PaelPool2") + arr("PaelPool3")
+                + [const(n) for n in ("RelicPaelsClaw", "RelicPaelsTooth", "RelicPaelsGrowth", "RelicPaelsLegion")]
+                + arr("TezcataraPool1") + arr("TezcataraPool2") + arr("TezcataraPool3")
+                + darv + arr("DarvActOneSet"))
+        act3 = (arr("NonupeipePool") + [const("RelicBeautifulBracelet")]
+                + arr("TanxPool") + [const("RelicTriBoomerang")]
+                + arr("VakuuPool1") + arr("VakuuPool2") + arr("VakuuPool3")
+                + darv + arr("DarvActTwoSet"))
+        neow = arr("NeowPositiveOptions") + arr("NeowPairedOptions") + arr("NeowCurseOptions")
+        known = set(self.lib.names.relics())
+        pools = {k: sorted({r for r in v if r in known}) for k, v in (("neow", neow), (2, act2), (3, act3))}
+        self.lib._ancient_pools = pools
+        return pools
+
     def transform_pool(self) -> list[int]:
         """변환 결과 후보: 직업·무색 카드 (저주·상태이상 제외)."""
         return [c for c in self.lib.probe_card_pool if self.card_upgradable(c)]

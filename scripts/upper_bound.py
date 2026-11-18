@@ -46,8 +46,9 @@ def main() -> None:
     pool = co.combat_pool(run)
     cards, pots, relic_pool = co.card_pool(run), co.potion_pool(run), run.relic_pool()
     starters = co.parse_starters(cfg.starter_cards, {i.name: c for c, i in run.lib.cards.items()})
+    ancients = run.ancient_relic_pools() if getattr(cfg, "relic_scheme", "uniform") == "acts" else None
     eval_rng = np.random.default_rng(10**6 + cfg.seed)  # 학습의 검증 전투와 같은 난수
-    eval_set = [co.sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool, starters)
+    eval_set = [co.sample_scenario(eval_rng, cfg, cards, pots, e, relic_pool, starters, ancients)
                 for _ in range(cfg.eval_rounds) for e in pool]
 
     policy = co.make_policy(run.vocab, cfg)
