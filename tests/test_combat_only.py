@@ -48,3 +48,21 @@ def test_starter_cards_first():
         assert ids.count(10) <= 5 and ids.count(11) <= 5 and ids.count(12) <= 1
         assert cfg.deck_min <= len(ids) <= max(cfg.deck_max, 11)
         assert all(c in (1, 2, 3, 10, 11, 12) for c in ids)
+
+
+def test_fight_text_and_view_accept_new_intents():
+    from sts2ai.train.combat_only import fight_text
+    from sts2ai.train.fight_view import to_md
+
+    step = {"turn": 1, "hp": 50, "block": 0, "energy": 3, "action": "턴 종료", "prob_pct": 40.0, "action_prob_pct": 40.0,
+            "top": [["턴 종료", 40.0]], "hand": [["Bash", 2, True]], "select": None, "endturn": [-4.0, -8.0, 0.0, 1],
+            "enemies": [{"slot": 0, "name": "Byrdonis", "hp": 40, "block": 0, "intent": ["Attack", 24, 3],
+                         "next": ["Debuff", 1, 1]},
+                        {"slot": 1, "name": "Old", "hp": 10, "block": 0, "intent": ["Attack", 6]}]}
+    rec = {"fmt": 2, "enemy_names": ["Byrdonis"], "encounter": 1, "sim_act": 1, "kind": "Normal", "won": True,
+           "hp_start": 50, "max_hp": 80, "hp_end": 40, "score": 1.5, "deck": ["Bash"], "potions": [], "relics": [],
+           "steps": [step]}
+    txt = fight_text(rec)
+    assert "Attack 24 (8x3)" in txt and "+[Debuff 1]" in txt
+    md = to_md(0, [rec])
+    assert "(8×3)" in md

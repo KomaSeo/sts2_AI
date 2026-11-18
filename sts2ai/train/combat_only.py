@@ -290,11 +290,14 @@ def enemy_text(e: dict) -> str:
     def intent(x):
         if not x:
             return "?"
-        kind, mag = x
-        return f"{kind} {mag}" if mag else kind
+        kind, mag = x[0], x[1]
+        hits = x[2] if len(x) > 2 else 1
+        if not mag:
+            return kind
+        return f"{kind} {mag}" + (f" ({mag // hits}x{hits})" if kind == "Attack" and hits > 1 else "")
 
     s = f"{e['name']} HP{e['hp']}" + (f" 방어{e['block']}" if e.get("block") else "") + f" [{intent(e.get('intent'))}]"
-    return s + (f" 다음[{intent(e['next'])}]" if e.get("next") else "")
+    return s + (f" +[{intent(e['next'])}]" if e.get("next") else "")
 
 
 def fight_text(rec: dict) -> str:
