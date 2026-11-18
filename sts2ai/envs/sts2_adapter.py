@@ -44,6 +44,7 @@ class _Lib:
 
     def __init__(self, repo: str | Path):
         repo = Path(repo).resolve()
+        self.repo = repo
         for p in (repo / "src", repo / "rl"):
             if str(p) not in sys.path:
                 sys.path.insert(0, str(p))
@@ -493,6 +494,21 @@ class Sts2Run:
     def raw_card(self, raw_id: int, upgraded: bool) -> Card:
         return self.lib.card(int(raw_id), bool(upgraded), 0)
 
+    def action_token_name(self, ty: int, vid: int) -> str:
+        """전투 행동 토큰 → 읽을 이름 (대시보드용). 카드·포션은 시뮬레이터 이름, 턴 종료 등은 한국어."""
+        if ty in (S.TYPE_HAND, S.TYPE_SELECT, S.TYPE_HAND_LOCKED):
+            info = self.lib.cards.get(self.card_raw(vid))
+            n = self.lib.names.spaced(info.name) if info else f"카드{vid}"
+            return n if ty == S.TYPE_HAND else f"고르기: {n}"
+        if ty == S.TYPE_POTION:
+            inv = getattr(self.lib, "_potion_inv", None)
+            if inv is None:
+                inv = {v: k for k, v in self.lib.potion_index.items()}
+                self.lib._potion_inv = inv
+            pid = inv.get(int(vid))
+            return "포션: " + (self.lib.names.spaced(self.lib.names.potions().get(pid, str(pid))) if pid else "?")
+        return {S.TYPE_END_TURN: "턴 종료", S.TYPE_DECLINE: "고르지 않기"}.get(ty, f"행동{ty}")
+
     def card_raw(self, vocab_id: int) -> int:
         """카드 임베딩 인덱스 → 시뮬레이터 카드 id (없으면 0)."""
         inv = getattr(self.lib, "_card_inv", None)
@@ -507,16 +523,30 @@ class Sts2Run:
     def encounter_vocab(self, raw_id: int) -> int:
         return int(self.lib.ct.VOCAB.encounter.get(int(raw_id), 0))
 
+    def encounter_kind(self, raw_id: int) -> str:
+        """적 목록표(EncounterTags.g.cs) 기준 "Weak" | "Normal" | "Elite" | "Boss" (없으면 "Normal")."""
+        kinds = getattr(self.lib, "_enc_kind", None)
+        if kinds is None:
+            from ..train.matchup import load_pools  # noqa: PLC0415
+
+            kinds = {}
+            for pools in load_pools(self.lib.repo).values():
+                for kind, ids in pools.items():
+                    for e in ids:
+                        kinds.setdefault(e, kind)
+            self.lib._enc_kind = kinds
+        return kinds.get(int(raw_id), "Normal")
+
     def transform_pool(self) -> list[int]:
         """변환 결과 후보: 직업·무색 카드 (저주·상태이상 제외)."""
         return [c for c in self.lib.probe_card_pool if self.card_upgradable(c)]
 
     def start_probe(self, seed: int, deck: list[tuple[int, bool]], encounter: int, hp: int,
                     combats_before: int, relics: list[int] | None = None,
-                    max_hp: int | None = None) -> "Sts2Run | None":
+                    max_hp: int | None = None, potions: list[int] | None = None) -> "Sts2Run | None":
         """런을 복제(숨은 난수는 seed 로 재추첨)한 뒤, 그 복제본에서 덱을 바꿔 encounter 와의 전투를 바로 시작한다.
 
-        유물(relics)·최대 HP(max_hp) 를 주지 않으면 지금 런 그대로. 포션·골드도 지금 런 그대로.
+        유물(relics)·최대 HP(max_hp)·포션(potions) 을 주지 않으면 지금 런 그대로. 골드는 지금 런 그대로.
         Sts2Run_StartCombat 은 카드를 (id, 강화) 로만 받아서 덱 카드의 인챈트와 유물 카운터는 빠진다. 시작하지 못하면 None.
         """
         c = self.clone(seed)
@@ -524,7 +554,7 @@ class Sts2Run:
         ids = [-cid if up else cid for cid, up in deck]
         relics = [int(r["relic_id"]) for r in info["relic_slots"]] if relics is None else [int(r) for r in relics]
         max_hp = int(info["player_max_hp"]) if max_hp is None else int(max_hp)
-        pots = [int(p) for p in info["potions"] if p]
+        pots = [int(p) for p in info["potions"] if p] if potions is None else [int(p) for p in potions]
         status = c.lib.native.run_start_combat(
             c.env._run_handle, ids, int(encounter), relics, int(hp), max_hp, pots,  # noqa: SLF001
             int(info["gold"]), int(combats_before), c.env._run_obs_buf)  # noqa: SLF001

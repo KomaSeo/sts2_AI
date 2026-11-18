@@ -1,4 +1,4 @@
-"""덱 빌딩 모듈: 치명적인 적 하나를 대비해 덱을 짜는 별도 신경망.
+﻿"""덱 빌딩 모듈: 치명적인 적 하나를 대비해 덱을 짜는 별도 신경망.
 
 평가기·선택 정책과 가중치를 공유하지 않는다 (자기 임베딩·인코더를 따로 가진다).
 입력 상태는 RunState 로 받되, 맵은 없고(None) boss 칸에 "대비하려는 적"의 encounter id 를 넣는다.
@@ -19,11 +19,20 @@ from ..schema import Card, ChoiceOption, RunState
 from .choice_policy import ChoicePolicy, collate_options
 
 
+MAX_HORIZON = 63
+
+
 def builder_state(deck: list[Card], relics: list[int], gold: int, max_hp: int, act: int, floor: int,
-                  target: int) -> RunState:
-    """덱 빌딩 모듈의 입력 상태. relics 는 유물 임베딩 인덱스, target 은 대비하는 적의 encounter 인덱스."""
-    return RunState(act=act, floor=floor, hp=max_hp, max_hp=max_hp, gold=gold, ascension=0, deck=list(deck),
-                    relics=[(r, 0) for r in relics], potions=[], map=None, boss=target)
+                  target: int, horizon: int = 0, hp: int | None = None) -> RunState:
+    """덱 빌딩 모듈의 입력 상태. relics 는 유물 임베딩 인덱스, target 은 대비하는 적의 encounter 인덱스.
+
+    horizon = 대상 적을 만나기까지 남은 층수. 같은 덱이라도 남은 성장 기회에 따라 가치가 다르다.
+    hp = 그 적과 싸울 때의 HP (없으면 최대 HP). 가치 머리는 "남은 층수 뒤 이 HP 로 그 적과 싸우면"을 예측한다.
+    """
+    st = RunState(act=act, floor=floor, hp=max_hp if hp is None else int(hp), max_hp=max_hp, gold=gold, ascension=0, deck=list(deck),
+                  relics=[(r, 0) for r in relics], potions=[], map=None, boss=target)
+    st.horizon = int(max(0, min(MAX_HORIZON, horizon)))  # RunState 에 없는 칸이라 속성으로 붙인다
+    return st
 
 
 class DeckBuilder(nn.Module):
@@ -34,9 +43,17 @@ class DeckBuilder(nn.Module):
         self.encoder = RunEncoder(self.emb)
         self.policy = ChoicePolicy(self.emb)
         self.value = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
+        # 대상 적까지 남은 층수: ctx 와 run_vec 에 더한다 (예전 가중치에는 없어 0 근처에서 시작)
+        self.horizon = nn.Embedding(MAX_HORIZON + 1, d)
+        nn.init.normal_(self.horizon.weight, std=0.02)
 
     def _enc(self, states: list[RunState]):
-        return self.encoder.encode_all(to_device(collate_run(states, self.vocab), module_device(self)))
+        dev = module_device(self)
+        enc = self.encoder.encode_all(to_device(collate_run(states, self.vocab), dev))
+        h = self.horizon(torch.tensor([getattr(s, "horizon", 0) for s in states], device=dev))
+        enc["ctx"] = enc["ctx"] + h
+        enc["run_vec"] = enc["run_vec"] + h
+        return enc
 
     def forward(self, states: list[RunState], option_lists: list[list[ChoiceOption]]):
         """(선택지 logit [B,O], 가치 [B])."""

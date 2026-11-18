@@ -117,7 +117,9 @@ def rollout_choice_group(run: RunSim, agent, cfg, rng: np.random.Generator, stat
     """지금 선택 화면에서 런을 G 번 복제해 서로 다른 선택을 비교한다."""
     G = cfg.choice_group_size
     logits = choice_logits(agent, [state], [options])[0, : len(options)]
-    dist = torch.distributions.Categorical(logits=logits)
+    # 온도: softmax(logit / temp) 에서 뽑아 잘 안 고르는 선택지(카드 건너뛰기 등)도 비교에 나오게 한다.
+    # 뽑은 분포의 확률을 이전 확률로 적고, choice_update 도 같은 온도로 비율을 잰다
+    dist = torch.distributions.Categorical(logits=logits / getattr(cfg, "choice_temp", 1.0))
     picks = [int(dist.sample()) for _ in range(G)]
     samples, raw = [], []
     for i in picks:
@@ -141,8 +143,8 @@ def rollout_choice_group(run: RunSim, agent, cfg, rng: np.random.Generator, stat
 
 def choice_update(agent, optim: torch.optim.Optimizer, samples: list[ChoiceSample], epochs: int = 2,
                   clip: float = 0.2, ent_coef: float = 0.01, minibatch: int = 128, trunk_grad: bool = True,
-                  params=None) -> dict:
-    """PPO 식 clipped objective (선택 한 번 = 한 스텝)."""
+                  params=None, temp: float = 1.0) -> dict:
+    """PPO 식 clipped objective (선택 한 번 = 한 스텝). temp = 비교 그룹을 뽑을 때 쓴 온도 (비율도 그 온도로 잰다)."""
     if not samples:
         return {"choice_samples": 0}
     dev = module_device(agent.choice)
@@ -159,7 +161,7 @@ def choice_update(agent, optim: torch.optim.Optimizer, samples: list[ChoiceSampl
             logits = agent.choice(enc, opt)
             logp_all = torch.log_softmax(logits, -1)
             a = torch.tensor([s.action for s in chunk], device=dev)
-            lp = logp_all.gather(1, a.unsqueeze(1)).squeeze(1)
+            lp = torch.log_softmax(logits / temp, -1).gather(1, a.unsqueeze(1)).squeeze(1)
             ent = -(logp_all.exp() * logp_all.clamp(min=-30)).sum(-1)
             old = torch.tensor([s.logp for s in chunk], device=dev)
             adv = torch.tensor([s.advantage for s in chunk], dtype=torch.float, device=dev)

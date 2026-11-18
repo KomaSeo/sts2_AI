@@ -24,15 +24,17 @@ import torch
 
 from ..agents import ChoicePolicy, CombatPolicy, Evaluator
 from ..agents.deck_builder import DeckBuilder
+from ..agents.mix_net import MixNet
 from ..agents.chooser import ExpectedValueChooser
 from ..batching import collate_run
 from ..encoders import SharedEmbeddings
 from ..envs.base import PHASE_COMBAT, PHASE_DONE, PHASE_MAP, PHASE_OTHER, RunSim
+from .. import schema as S
 from ..schema import NODE_BOSS
 from .choice import ChoiceSample, choice_update, pick, rollout_choice_group, screen_options
 from .evaluator_train import RunRecorder, Snapshot, train_evaluator
-from .deckbuild import deck_update
-from .grpo import LocalActor, Trajectory, grpo_update, rollout_group
+from .deckbuild import deck_update, mix_update
+from .grpo import LocalActor, Trajectory, focus_train, group_gap, grpo_update, rollout_group
 
 
 @dataclass
@@ -98,6 +100,39 @@ class Config:
     # 덱 빌딩 선택의 이점: "grpo" = 재생 최종 점수의 그룹 z 점수(모든 선택이 같은 값), "td" = 선택 직후 덱 가치 D 의
     # 상승(정규화), "mix" = 둘의 합
     deck_adv: str = "mix"
+    deck_lambda: float = 0.7  # 덱 가치 D 의 TD(λ) 목표: 1 = 최종 전투 점수만, 0 = 다음 단계 예측만
+    deck_all_coef: float = 1.0  # 선택지 전부 평가 손실의 비중 (0 = 끔)
+    # 온도 탐색: 비교 실험(덱 빌딩 재생, 단기 선택 복제 비교)에서 softmax(logit / 온도) 로 뽑는다.
+    # 높은 확률은 낮아지고 낮은 확률은 올라가 굳은 선택지도 시험된다 (순서는 그대로). 실제 런은 온도 1.
+    deck_temp: float = 2.0
+    choice_temp: float = 2.0
+    # 덱 빌딩 선택 머리의 엔트로피 하한: H / log(선택지 수) 가 이 값 아래면 deck_ent_floor_coef × 부족분 벌점
+    deck_ent_floor: float = 0.5
+    deck_ent_floor_coef: float = 1.0
+    # β·γ 신경망: 막별 기본값(진화 전략)에 상황별 보정을 더한다. 실제 런 결과(오른 층 수)로 정책 경사 학습
+    learn_mix_net: bool = True
+    # 전투 GRPO: 공통 난수 (그룹 안 분기들이 같은 시드로 숨은 난수를 뽑는다)
+    combat_crn: bool = True
+    # 적응 그룹: (가장 좋은 점수 − 평균) 이 combat_adapt_eps 보다 크면 group_size 개씩 더 싸워 본다 (최대 combat_adapt_max)
+    combat_adapt_max: int = 32
+    combat_adapt_eps: float = 0.05
+    # 집중 학습: 반복마다 개선 여지가 가장 큰 전투 focus_states 개를 골라, 학습용 시드로 업데이트하고
+    # 검증용 시드 점수가 focus_eps 넘게 오르지 않으면 멈춘다 (최대 focus_rounds 번)
+    focus_states: int = 2
+    focus_rounds: int = 5
+    focus_train_seeds: int = 4
+    focus_val_seeds: int = 4
+    focus_eps: float = 0.02
+    # 다른 전투 검증: 이번 반복의 다른 후보 전투 focus_other_states 개를 같은 난수로 다시 싸워 보고,
+    # 평균 점수가 focus_other_tol 넘게 떨어진 라운드는 받아들이지 않는다
+    focus_other_states: int = 4
+    focus_other_tol: float = 0.05
+    # 실제 런에서 덱 빌딩 모듈의 의견: "head" = 선택 머리의 log 확률, "value" = log_softmax(고른 뒤 덱 가치 / τ)
+    # (무작위 결과는 숨은 난수를 새로 뽑은 복제 deck_value_samples 번의 평균, 변환은 후보 평균)
+    deck_pick_mode: str = "head"
+    deck_value_tau: float = 0.01
+    deck_value_samples: int = 4
+    lr_mix: float = 1e-3
     deck_hp_min: float = 0.5  # 재생 전투 HP = 최대 HP × U(이 값, 1), 그룹 안에서는 같음
     deck_trigger_prob: float = 0.5  # 치명적인 적과의 전투가 시작될 때 에피소드를 만들 확률
     deck_trigger_top: int = 8  # 치명적인 적 = 사망 가중치 상위 몇 개 (보스는 항상 포함)
@@ -137,6 +172,8 @@ class Agent:
         self.choice = ChoicePolicy(self.emb)
         # 덱 빌딩 모듈: 자기 임베딩을 따로 가진다 (다른 모듈과 가중치를 공유하지 않음)
         self.deck = DeckBuilder(vocab, d)
+        # β·γ 신경망: 덱 빌딩 모듈 비중 β, 강화 비중 γ 의 상황별 보정
+        self.mix_net = MixNet(d, vocab.n_acts)
         # 기대값 선택기가 쓸 평가기. None 이면 self.evaluator. 전투 정책은 self.evaluator 의 run_vec 으로
         # 학습됐으므로, 선택기 쪽만 다른 평가기로 바꿔 실험할 때 쓴다.
         self.chooser_evaluator: Evaluator | None = None
@@ -154,17 +191,22 @@ class Agent:
         끊는 이유: 평가기는 생존 라벨로만 배우게 두고, 전투 정책 손실이 평가기 표현을 흔들지 않게.
         정책은 자기 쪽 run_proj 로 이 벡터를 어떻게 쓸지 배운다.
         """
-        return self.evaluator.run_vector(collate_run([state], self.vocab))[0]
+        from ..batching import module_device, to_device  # noqa: PLC0415
+
+        batch = to_device(collate_run([state], self.vocab), module_device(self.evaluator))
+        return self.evaluator.run_vector(batch)[0]
 
     def state_dict(self):
         return {"evaluator": self.evaluator.state_dict(), "policy": self.policy.state_dict(),
-                "choice": self.choice.state_dict(), "deck": self.deck.state_dict()}
+                "choice": self.choice.state_dict(), "deck": self.deck.state_dict(),
+                "mix_net": self.mix_net.state_dict()}
 
     def to(self, device) -> "Agent":
         self.evaluator.to(device)
         self.policy.to(device)  # 공유 임베딩은 세 모듈에 같이 들어 있다
         self.choice.to(device)
         self.deck.to(device)
+        self.mix_net.to(device)
         return self
 
     def run_vec_with_grad(self, states) -> torch.Tensor:
@@ -182,7 +224,7 @@ class Agent:
         """예전 구조의 가중치도 받는다: 없어진 모듈(미래 막 헤드)은 버리고, 커진 임베딩(노드 종류 9 → 11)은
         있던 줄만 복사하고 새 줄은 초기값을 둔다."""
         for name, module in (("evaluator", self.evaluator), ("policy", self.policy), ("choice", self.choice),
-                             ("deck", self.deck)):
+                             ("deck", self.deck), ("mix_net", self.mix_net)):
             if name in sd:  # 선택 정책·덱 빌딩 모듈이 생기기 전에 저장한 가중치에는 "choice"·"deck" 이 없다
                 module.load_state_dict(_adapt_state(module.state_dict(), sd[name]))
 
@@ -224,8 +266,9 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
     덱 빌딩 모듈의 치명적인 적 판단에 쓴다.
     extras["mix"]: 덱 빌딩 모듈과 단기 모듈을 합치는 비율의 분포 {"m_beta": [막별 log β 평균], "m_gamma": [...], "sigma"}.
     """
-    from .deckbuild import (DeckRecorder, combined_pick, deck_relevant, is_deadly,  # noqa: PLC0415
-                            run_deck_group)
+    from .deckbuild import (DeckRecorder, combined_pick, deck_choice_screen, fight_value_samples,  # noqa: PLC0415
+                            is_deadly, run_deck_group)
+    from .probe import probe_score  # noqa: PLC0415
     from .probe import run_probe  # noqa: PLC0415
 
     extras = extras or {}
@@ -233,14 +276,19 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
     use_deck = cfg.learn_deck and hasattr(run, "clone_exact")
     deck_samples: list = []
     deck_info: list[dict] = []
+    match_samples: list = []  # 덱 빌딩 재생 전투 결과 → 상성 신경망 M 의 학습 데이터
+    fight_samples: list = []  # 실제로 일어난 전투들 → 덱 빌딩 가치 머리의 남은 층수 0 정답
+    cur_fight = None  # (전투 시작 상태, encounter, 분기 결과들)
+    focus_cands: list[dict] = []  # 집중 학습 후보 전투 (토큰, 개선 여지)
     n_acts = agent.vocab.n_acts
     mix = extras.get("mix") or {"m_beta": [float(np.log(cfg.mix_init_beta))] * n_acts,
                                 "m_gamma": [float(np.log(cfg.mix_init_gamma))] * n_acts, "sigma": cfg.mix_sigma}
     explore_mix = use_deck and collect_grpo and not greedy
     eps_b = rng.normal(size=n_acts) if explore_mix else np.zeros(n_acts)
     eps_g = rng.normal(size=n_acts) if explore_mix else np.zeros(n_acts)
-    beta = np.exp(np.asarray(mix["m_beta"]) + mix["sigma"] * eps_b)
-    gamma = np.exp(np.asarray(mix["m_gamma"]) + mix["sigma"] * eps_g)
+    log_beta = np.asarray(mix["m_beta"]) + mix["sigma"] * eps_b
+    log_gamma = np.asarray(mix["m_gamma"]) + mix["sigma"] * eps_g
+    mix_steps: list = []  # β·γ 신경망 학습용 (합쳐 고른 화면들)
 
     do_probe = collect_grpo and cfg.probe_prob > 0 and hasattr(run, "start_probe")
     probe_snaps: list[Snapshot] = []
@@ -287,17 +335,41 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
                                                    n_combats - 1)
                         if info is not None:
                             deck_samples.extend(smp)
+                            match_samples.extend(info.pop("match_samples", []))
                             deck_info.append(info)
                 # 전투가 시작될 때 한 번: 이 전투가 어느 노드에서 벌어지고 다음에 뭐가 오는지 (맵 포함)
                 run_vec = agent.run_vec(run.run_state()) if cfg.policy_sees_map else None
+                fork_out = []
                 if collect_grpo and n_combats % cfg.grpo_every_n_combats == 0:
-                    groups.append(rollout_group(
-                        run, agent.combat_actor(), agent.evaluator if use_evaluator else None,
-                        cfg.group_size, rng, cfg.advantage_mode, run_vec=run_vec))
+                    grp = rollout_group(run, agent.combat_actor(), agent.evaluator if use_evaluator else None,
+                                        cfg.group_size, rng, cfg.advantage_mode, run_vec=run_vec, crn=cfg.combat_crn,
+                                        adapt_max=cfg.combat_adapt_max, adapt_eps=cfg.combat_adapt_eps)
+                    groups.append(grp)
+                    if cfg.focus_states > 0 and hasattr(run, "snapshot") and hasattr(run, "restore"):
+                        # 집중 학습 후보: 이 전투 시작 상태의 토큰과 개선 여지
+                        focus_cands.append({"token": run.snapshot(), "gap": group_gap(grp, cfg.group_size),
+                                            "size": len(grp),
+                                            "encounter": str(getattr(run, "_info", {}).get("encounter", ""))})
+                    mh = max(1, run.run_state().max_hp)
+                    for tr in grp:  # 분기 전투도 같은 시작 상태에서의 실제 결과다
+                        sc = probe_score(tr, mh)
+                        fork_out.append((tr.won, sc - 1.0 if tr.won else 0.0, 1.0 if tr.won else sc))
+                if use_deck and collect_grpo and hasattr(run, "encounter_raw"):
+                    cur_fight = (run.run_state(), run.encounter_raw(), fork_out)
             o = run.combat_obs()
             rv = run_vec.unsqueeze(0) if run_vec is not None else None
             a, t, _ = agent.combat_actor()([o], rv, greedy)
             run.combat_step(int(a[0]), int(o.enemy_slots[int(t[0])]) if int(t[0]) >= 0 else -1)
+            if cur_fight is not None and run.phase != PHASE_COMBAT:
+                st0, enc0, outs = cur_fight
+                mh = max(1, st0.max_hp)
+                if run.died:
+                    frac = o.feats[o.enemy_tokens, S.F_ENEMY_HP_FRAC] if len(o.enemy_tokens) else np.ones(1)
+                    outs = outs + [(False, 0.0, float(1.0 - np.clip(frac, 0, 1).mean()))]
+                else:
+                    outs = outs + [(True, run.run_state().hp / mh, 1.0)]
+                fight_samples.extend(fight_value_samples(run, st0, enc0, outs))
+                cur_fight = None
         elif cfg.learn_choices:
             # 맵 노드와 전투 밖 선택 모두 선택 정책이 고른다
             state = run.run_state()
@@ -321,10 +393,13 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
             if collect_grpo and len(opts) > 1 and rng.random() < cfg.choice_fork_prob:
                 choice_samples.extend(rollout_choice_group(run, agent, cfg, rng, state, opts, use_evaluator))
                 n_choice_groups += 1
-            if use_deck and not is_map and len(opts) > 1 and deck_relevant(opts):
-                # 덱이 바뀌는 화면: 단기 모듈과 덱 빌딩 모듈을 합쳐 고른다
-                i = combined_pick(agent, run, state, opts, death_w, cfg, float(beta[run.act]),
-                                  float(gamma[run.act]), greedy)
+            if use_deck and not is_map and len(opts) > 1 and deck_choice_screen(run, opts, rng):
+                # 덱이 바뀌는 선택이 있는 화면: 단기 모듈과 덱 빌딩 모듈을 합쳐 고른다
+                # (HP·최대 HP·골드·유물만 바뀌는 화면은 단기 모듈만)
+                i, mstep = combined_pick(agent, run, state, opts, death_w, cfg, float(log_beta[run.act]),
+                                         float(log_gamma[run.act]), greedy)
+                if mstep is not None and explore_mix:
+                    mix_steps.append(mstep)
             else:
                 i, _ = pick(agent, state, opts, greedy)
             if is_map:
@@ -357,11 +432,37 @@ def play_run(agent: Agent, run: RunSim, cfg: Config, rng: np.random.Generator, s
               "death_encounter": last_enc if (run.died and last_enc is not None and run.floor == last_combat_floor)
               else None,
               "probe_snaps": probe_snaps, "probe_info": probe_info,
-              "deck_samples": deck_samples, "deck_info": deck_info,
+              "deck_samples": deck_samples + fight_samples, "deck_info": deck_info, "match_samples": match_samples,
+              "fight_samples": len(fight_samples), "focus_cands": focus_cands,
               # 합치는 비율 학습용: 이 런에서 뽑은 잡음과 결과 (오른 층 수)
               "mix_sample": ({"eps_beta": eps_b.tolist(), "eps_gamma": eps_g.tolist(),
-                              "gain": run.floor - start_floor} if explore_mix else None)}
+                              "gain": run.floor - start_floor, "steps": mix_steps} if explore_mix else None)}
     return snaps, groups, result
+
+
+def _save_focus_traces(path: Path, it: int, done: list[dict], run, keep: int = 10) -> None:
+    """집중 학습 예시를 대시보드용으로 저장한다 (최근 keep 개 반복). 행동은 사람이 읽을 이름으로 바꾼다."""
+    name = getattr(run, "action_token_name", None)
+
+    def label(ty, vid, slot):
+        s = name(ty, vid) if name is not None else f"{ty}:{vid}"
+        return s + (f" → 적{slot}" if slot >= 0 else "")
+
+    items = []
+    for d in done:
+        tr = d.get("trace")
+        if not tr:
+            continue
+        rounds = [{"val": r["val"], "train": r.get("train"), "other": r.get("other"),
+                   "same_seed": [{"score": f["score"], "won": f["won"], "hp": f["hp"],
+                                  "actions": [label(*a) for a in f["actions"]]} for f in r["same_seed"]]}
+                  for r in tr["rounds"]]
+        items.append({"iter": it, "act": d.get("act"), "floor": d.get("floor"), "encounter": d.get("encounter"),
+                      "gap": d.get("gap"), "rounds_run": d["rounds"], "val_gain": d["val_gain"],
+                      "val_seed": tr["val_seed"], "rounds": rounds})
+    old = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    old = [x for x in old if x.get("iter") != it] + items
+    path.write_text(json.dumps(old[-keep:], ensure_ascii=False), encoding="utf-8")
 
 
 def resolve_device(name: str) -> torch.device:
@@ -389,7 +490,10 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
     rng = np.random.default_rng(cfg.seed)
     if run is None and workers == 0:
         run = make_run()
-    vocab = run.vocab if run is not None else make_run().vocab
+    focus_run = run  # 집중 학습용 환경 (메인 프로세스). 워커로 수집하면 필요할 때 하나 만든다
+    if focus_run is None and cfg.focus_states > 0 and make_run is not None:
+        focus_run = make_run()
+    vocab = run.vocab if run is not None else (focus_run.vocab if focus_run is not None else make_run().vocab)
     agent = Agent(vocab, cfg.d_model).to(device)
     if cfg.init_ckpt:
         agent.load_state_dict(torch.load(cfg.init_ckpt, map_location="cpu"))
@@ -417,6 +521,7 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
     opt_pol = torch.optim.Adam(pol_params, lr=cfg.lr_policy)
     opt_choice = torch.optim.Adam(choice_params, lr=cfg.lr_choice)
     opt_deck = torch.optim.Adam(agent.deck.parameters(), lr=cfg.lr_deck)
+    opt_mix = torch.optim.Adam(agent.mix_net.parameters(), lr=cfg.lr_mix)
     # 합치는 비율의 분포 (막별 log β, log γ 의 평균). 런마다 뽑고 결과로 옮긴다
     n_acts = vocab.n_acts
     mix = {"m_beta": [float(np.log(cfg.mix_init_beta))] * n_acts,
@@ -425,7 +530,7 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
     val_buffer: list[Snapshot] = []
     probe_buffer: list[Snapshot] = []  # 보스 모의전 스냅숏 (보스 노드에만 라벨)
     probe_weights: dict[int, dict[tuple[int, bool], float]] = {}  # 막 -> (encounter, 보스인가) -> 최근 사망 횟수
-    optimizers = {"eval": opt_eval, "policy": opt_pol, "choice": opt_choice, "deck": opt_deck}
+    optimizers = {"eval": opt_eval, "policy": opt_pol, "choice": opt_choice, "deck": opt_deck, "mix_net": opt_mix}
     if cfg.init_mix:
         mix = json.loads(Path(cfg.init_mix).read_text())
         log(f"init_mix={cfg.init_mix}")
@@ -466,7 +571,8 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
                     pool = pools[acts[int(rng.integers(len(acts)))]]  # 막을 고르게 고른 뒤 그 막의 상태 하나
                     starts[i] = pool[int(rng.integers(len(pool)))]
             results, groups, choice_samples, probe_info = [], [], [], []
-            deck_samples, deck_info, mix_samples = [], [], []
+            deck_samples, deck_info, mix_samples, match_new = [], [], [], []
+            focus_cands = []
             for snaps, g, res in collector.collect(actor, seeds, use_evaluator=use_eval, starts=starts,
                                                    probe_weights=probe_weights, extras={"mix": mix}):
                 n_runs += 1
@@ -477,6 +583,8 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
                 probe_info.extend(res.pop("probe_info", []))
                 deck_samples.extend(res.pop("deck_samples", []))
                 deck_info.extend(res.pop("deck_info", []))
+                match_new.extend(res.pop("match_samples", []))
+                focus_cands.extend(res.pop("focus_cands", []))
                 ms = res.pop("mix_sample", None)
                 if ms is not None:
                     mix_samples.append(ms)
@@ -513,16 +621,53 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
             pg_stats = grpo_update(agent.policy, opt_pol, groups, epochs=cfg.grpo_epochs,
                                    run_vec_fn=agent.run_vec_with_grad if cfg.trunk_grad else None,
                                    params=pol_params)
+            focus_stats = {}
+            if cfg.focus_states > 0 and focus_cands and hasattr(focus_run, "restore"):
+                # 집중 학습: 개선 여지가 가장 큰 전투부터. 검증용 시드 점수가 더 안 오르면 멈춘다
+                done = []
+                chosen = sorted(focus_cands, key=lambda c: -c["gap"])[: cfg.focus_states]
+                rest = [c for c in focus_cands if all(c is not x for x in chosen)]
+                for c in chosen:
+                    pick_o = rng.choice(len(rest), min(cfg.focus_other_states, len(rest)), replace=False) if rest else []
+                    try:
+                        done.append(focus_train(agent.policy, opt_pol, focus_run, c["token"],
+                                                agent.evaluator if use_eval else None, cfg, rng, groups,
+                                                run_vec_fn=agent.run_vec_with_grad if cfg.trunk_grad else None,
+                                                params=pol_params,
+                                                run_vec_of=agent.run_vec if cfg.policy_sees_map else None,
+                                                trace=True,
+                                                other_tokens=[rest[int(i)]["token"] for i in pick_o])
+                                    | {"gap": c["gap"], "floor": c["token"].get("floor", -1),
+                                       "act": c["token"].get("act", -1), "encounter": c.get("encounter", "")})
+                    except Exception as e:  # noqa: BLE001  재현 실패 등은 건너뛴다
+                        log(f"focus_train 건너뜀: {e!r}")
+                if done:
+                    _save_focus_traces(out / "focus_trace.json", it, done, focus_run)
+                    focus_stats = {"focus_n": len(done),
+                                   "focus_rounds": float(np.mean([d["rounds"] for d in done])),
+                                   "focus_val_gain": float(np.mean([d["val_gain"] for d in done])),
+                                   "focus_gap": float(np.mean([d["gap"] for d in done])),
+                                   "focus_other_delta": float(np.mean([d["other_delta"] for d in done]))}
             ch_stats = (choice_update(agent, opt_choice, choice_samples, epochs=cfg.grpo_epochs,
-                                      trunk_grad=cfg.trunk_grad, params=choice_params)
+                                      trunk_grad=cfg.trunk_grad, params=choice_params, temp=cfg.choice_temp)
                         if cfg.learn_choices else {})
-            deck_stats = (deck_update(agent.deck, opt_deck, deck_samples, epochs=cfg.grpo_epochs)
+            deck_stats = (deck_update(agent.deck, opt_deck, deck_samples, epochs=cfg.grpo_epochs,
+                                      all_coef=cfg.deck_all_coef, temp=cfg.deck_temp,
+                                      ent_floor=cfg.deck_ent_floor, ent_floor_coef=cfg.deck_ent_floor_coef)
                           if cfg.learn_deck else {})
+            mix_stats = {}
             if len(mix_samples) >= 4:
                 # 진화 전략: 오른 층 수를 표준화한 점수 z 로 평균을 옮긴다. Δm = lr · σ · mean(z · ε)
                 gain = np.array([m["gain"] for m in mix_samples], dtype=np.float64)
                 if gain.std() > 1e-6:
                     z = (gain - gain.mean()) / gain.std()
+                    if cfg.learn_mix_net:  # β·γ 신경망: 같은 z 를 그 런의 모든 합친 선택에 이점으로 준다
+                        steps = []
+                        for m, zi in zip(mix_samples, z):
+                            for s in m.get("steps", []):
+                                s.advantage = float(zi)
+                                steps.append(s)
+                        mix_stats = mix_update(agent.mix_net, opt_mix, steps)
                     for key, ek in (("m_beta", "eps_beta"), ("m_gamma", "eps_gamma")):
                         eps = np.array([m[ek] for m in mix_samples])
                         step = cfg.mix_lr * mix["sigma"] * (z[:, None] * eps).mean(0)
@@ -556,6 +701,11 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
                 **({"beta": "/".join(f"{np.exp(v):.2f}" for v in mix["m_beta"]),
                     "gamma": "/".join(f"{np.exp(v):.2f}" for v in mix["m_gamma"])} if cfg.learn_deck else {}),
                 **deck_stats,
+                **mix_stats,
+                **focus_stats,
+                **({"combat_gap8": float(np.mean([group_gap(g, cfg.group_size) for g in groups])),
+                    "combat_gap": float(np.mean([group_gap(g) for g in groups])),
+                    "combat_group": float(np.mean([len(g) for g in groups]))} if groups else {}),
                 **({"probes": len(probe_info),
                     "probe_boss": sum(p["boss"] for p in probe_info),
                     "probe_win": float(np.mean([p["win_frac"] for p in probe_info])),
@@ -575,5 +725,8 @@ def train(run: RunSim | None, cfg: Config, log=print, make_run=None) -> Agent:
                     pickle.dump(pools, f)
             if cfg.learn_deck:
                 (out / "mix.json").write_text(json.dumps(mix))
+            if match_new:  # 상성 신경망 M 의 학습 데이터를 반복마다 이어 붙여 저장 (pickle 여러 번 덤프)
+                with open(out / "matchup_data.pkl", "ab") as f:
+                    pickle.dump(match_new, f)
     (out / "history.json").write_text(json.dumps(history, indent=2))
     return agent

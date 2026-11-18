@@ -334,6 +334,8 @@ def test_parallel_collection_matches_serial():
     for (s1, g1, r1), (s2, g2, r2) in zip(serial, parallel):
         c1, c2 = r1.pop("choice_samples"), r2.pop("choice_samples")
         a1, a2 = r1.pop("act_starts"), r2.pop("act_starts")  # 토큰 안의 난수 객체는 값으로 비교되지 않는다
+        f1, f2 = r1.pop("focus_cands"), r2.pop("focus_cands")
+        assert [(f["gap"], f["size"]) for f in f1] == [(f["gap"], f["size"]) for f in f2]
         assert [(a, t["act"], t["floor"]) for a, t in a1] == [(a, t["act"], t["floor"]) for a, t in a2]
         assert r1 == r2 and len(s1) == len(s2)
         # 고른 선택지는 같아야 한다. log 확률은 스레드 수에 따라 소수 7째 자리가 다를 수 있다.
@@ -545,7 +547,7 @@ def test_train_state_roundtrip(tmp_path):
                  device="cpu", out_dir=str(out1))
     train(ToyRun(), cfg, log=lambda *_: None)
     ts = torch.load(out1 / "train_state.pt", map_location="cpu", weights_only=False)
-    assert set(ts["optim"]) == {"eval", "policy", "choice", "deck"}
+    assert set(ts["optim"]) == {"eval", "policy", "choice", "deck", "mix_net"}
     assert ts["optim"]["eval"]["state"]  # 평가기는 한 번 이상 업데이트했다
     msgs = []
     cfg2 = Config(iterations=1, runs_per_iter=2, group_size=2, d_model=32, workers=0, warmup_snapshots=0,
@@ -554,3 +556,281 @@ def test_train_state_roundtrip(tmp_path):
     train(ToyRun(), cfg2, log=msgs.append)
     line = next(m for m in msgs if str(m).startswith("init_optim="))
     assert "eval" in line and "policy" in line
+
+
+def test_deck_replay_temperature_exploration():
+    """온도 탐색: 정책이 건너뛰기에 낮은 확률을 줘도 온도를 올리면 건너뛰기가 더 자주 골라지고,
+    적힌 이전 확률은 실제로 뽑은(온도 적용) 분포의 확률이다."""
+    from sts2ai.agents.deck_builder import DeckBuilder
+    from sts2ai.train.deckbuild import Delta, Episode, ROpt, RScreen, replay
+
+    vocab = ToyRun().vocab
+    builder = DeckBuilder(vocab, 32)
+    run = _FakeRun(vocab)
+    opts = [ROpt(S.ChoiceOption(action=0, kind="card.take"), Delta(add=[(5, False)])),
+            ROpt(S.ChoiceOption(action=1, kind="card.skip"), Delta())]
+    ep = Episode(base={"deck": [(1, False)] * 6, "relics": [], "gold": 0, "max_hp": 80},
+                 screens=[RScreen("card", opts, ext=Delta(), act=0, floor=f) for f in range(1, 81)],
+                 ext_final=Delta(), act=0, floor=85, target_raw=1, is_boss=True)
+    orig = builder.forward
+
+    def skewed(states, option_lists):  # 첫 선택지 logit 을 +3 (확률 약 95%)
+        lg, v = orig(states, option_lists)
+        lg = lg.clone()
+        lg[:, 0] += 3.0
+        return lg, v
+
+    builder.forward = skewed
+    torch.manual_seed(0)
+    cold = replay(builder, run, ep, 1, np.random.default_rng(0), temp=1.0)
+    torch.manual_seed(0)
+    hot = replay(builder, run, ep, 1, np.random.default_rng(0), temp=3.0)
+    skips = lambda rep: sum(s.action == 1 for s in rep.samples if s.action >= 0)  # noqa: E731
+    assert skips(hot) > skips(cold)
+    s = next(s for s in hot.samples if s.action >= 0)
+    with torch.no_grad():
+        lg, _ = builder([s.state], [s.options])
+    want = float(torch.log_softmax(lg[0, : len(s.options)] / 3.0, -1)[s.action])
+    assert abs(s.logp - want) < 1e-4
+
+
+def test_deck_entropy_floor_spreads_policy():
+    """엔트로피 하한: 이점이 없어도 확률표가 한쪽으로 굳어 있으면 벌점으로 다시 편다."""
+    from sts2ai.agents.deck_builder import DeckBuilder, builder_state
+    from sts2ai.train.deckbuild import DeckSample, deck_update
+
+    vocab = ToyRun().vocab
+    torch.manual_seed(0)
+    builder = DeckBuilder(vocab, 32)
+    run = _FakeRun(vocab)
+    st = builder_state([run.raw_card(1, False)] * 5, [], 0, 80, 0, 3, 1, horizon=5, hp=60)
+    opts = [S.ChoiceOption(action=0, kind="card.take", card=run.raw_card(2, False)),
+            S.ChoiceOption(action=1, kind="card.skip")]
+    with torch.no_grad():
+        builder.policy.head[-1].bias.fill_(0.0)
+    orig = builder.forward
+    shift = torch.nn.Parameter(torch.tensor(4.0))  # 첫 선택지로 굳은 상태를 학습 가능한 값으로 흉내
+
+    def skewed(states, option_lists):
+        lg, v = orig(states, option_lists)
+        lg = lg.clone()
+        lg[:, 0] = lg[:, 0] + shift
+        return lg, v
+
+    builder.forward = skewed
+    params = list(builder.parameters()) + [shift]
+    optim = torch.optim.SGD(params, lr=0.5)
+    samples = [DeckSample(st, opts, 0, -0.02, advantage=0.0, target=1.0) for _ in range(8)]
+    before = float(shift)
+    out = deck_update(builder, optim, samples, epochs=3, ent_floor=0.5, ent_floor_coef=1.0, all_coef=0.0)
+    assert out["deck_floor_loss"] > 0
+    assert float(shift) < before
+
+
+def test_mix_net_starts_neutral_and_learns():
+    """β·γ 신경망: 처음엔 막별 기본값과 같고, 덱 빌딩 모듈을 따른 선택이 잘된 런이면 β 가 커진다."""
+    from sts2ai.agents.mix_net import MixNet
+    from sts2ai.train.deckbuild import MixStep, mix_update, mixed_logits
+
+    torch.manual_seed(0)
+    net = MixNet(16, 3)
+    x = net.features(torch.randn(16), 0, False)
+    short = torch.tensor([1.0, 0.0])
+    extra = torch.log(torch.tensor([0.1, 0.9]))  # 덱 빌딩 모듈은 두 번째를 원함
+    s = MixStep(x, False, short, extra, float(np.log(0.5)), 1, advantage=1.0)
+    lg = mixed_logits(net, [s])[0]
+    assert torch.allclose(lg, short + 0.5 * extra, atol=1e-6)
+    optim = torch.optim.Adam(net.parameters(), lr=1e-2)
+    for _ in range(30):
+        mix_update(net, optim, [s])
+    with torch.no_grad():
+        assert float(net(x.unsqueeze(0))[0, 0]) > 0.1  # log β 보정이 올라감
+
+
+def test_deck_value_scores_match_after_decks():
+    """가치만으로 고르기: 선택지마다 고른 뒤 덱의 가치. 카드 집기 = 덱 + 그 카드, 제거 = 그 카드를 뺀 덱,
+    건너뛰기 = 지금 덱, 변환 = 후보로 바꾼 덱."""
+    from sts2ai.agents.deck_builder import DeckBuilder, builder_state
+    from sts2ai.train.deckbuild import _builder_states, deck_value_scores
+
+    vocab = ToyRun().vocab
+    torch.manual_seed(0)
+    builder = DeckBuilder(vocab, 32)
+
+    class Run(_FakeRun):
+        def deck_raw(self):
+            return [(1, False), (2, False), (3, True)]
+
+        def card_raw(self, vid):  # raw_card 의 역 (raw → vid = raw + 1)
+            return vid - 1
+
+    run = Run(vocab)
+    deck = [run.raw_card(c, u) for c, u in run.deck_raw()]
+    st = builder_state(deck, [], 0, 80, 0, 3, 1, horizon=5, hp=60)
+    st.deck, st.relics, st.gold, st.max_hp, st.act, st.floor = deck, [], 0, 80, 0, 3
+    targets = [(1, 1.0, 5)]
+    opts = [S.ChoiceOption(action=0, kind="card.take", card=run.raw_card(4, False)),
+            S.ChoiceOption(action=1, kind="card.skip"),
+            S.ChoiceOption(action=2, kind="select.remove", deck_index=1),
+            S.ChoiceOption(action=3, kind="select.transform", deck_index=0)]
+    got = deck_value_scores(builder, run, st, opts, targets, np.random.default_rng(0))
+
+    def D(raw):
+        with torch.no_grad():
+            return float(builder.values(_builder_states(st, targets, deck=[run.raw_card(c, u) for c, u in raw]))[0])
+
+    want = [D([(1, False), (2, False), (3, True), (4, False)]), D(run.deck_raw()),
+            D([(1, False), (3, True)]), D([(7, False), (2, False), (3, True)])]
+    assert torch.allclose(got, torch.tensor(want), atol=1e-5)
+
+
+def test_replay_non_deck_event_uses_real_choice():
+    """덱이 안 바뀌는 이벤트(최대 HP 등)는 재생에서 덱 빌딩 모듈이 고르지 않고 실제 런의 선택을 그대로 적용한다.
+    덱이 바뀌는 선택지가 하나라도 있으면 덱 빌딩 모듈이 고른다."""
+    from sts2ai.agents.deck_builder import DeckBuilder
+    from sts2ai.train.deckbuild import Delta, Episode, ROpt, RScreen, changes_deck, replay
+
+    vocab = ToyRun().vocab
+    builder = DeckBuilder(vocab, 32)
+    run = _FakeRun(vocab)
+    bath = [ROpt(S.ChoiceOption(action=0, kind="event.option"), Delta(max_hp=2)),
+            ROpt(S.ChoiceOption(action=1, kind="event.option"), Delta())]
+    card_ev = [ROpt(S.ChoiceOption(action=0, kind="event.option"), Delta(add=[(5, False)])),
+               ROpt(S.ChoiceOption(action=1, kind="event.option"), Delta(gold=50))]
+    assert not any(changes_deck(o) for o in bath) and changes_deck(card_ev[0])
+    ep = Episode(base={"deck": [(1, False)] * 6, "relics": [], "gold": 0, "max_hp": 80},
+                 screens=[RScreen("event", bath, ext=Delta(), act=0, floor=3, real=Delta()),
+                          RScreen("event", bath, ext=Delta(), act=0, floor=4, real=Delta(max_hp=2)),
+                          RScreen("event", card_ev, ext=Delta(), act=0, floor=5)],
+                 ext_final=Delta(), act=0, floor=10, target_raw=1, is_boss=True)
+    rep = replay(builder, run, ep, 1, np.random.default_rng(0))
+    assert rep.max_hp == 82  # 실제 선택(4층에서만 들어감)을 그대로 적용
+    decided = [s for s in rep.samples if s.action >= 0]
+    assert len(decided) == 1 and decided[0].state.floor == 5  # 덱이 바뀌는 이벤트만 덱 빌딩 모듈이 고름
+
+
+def test_combat_crn_and_adaptive_group():
+    """공통 난수: 같은 시드의 분기들은 같은 행동을 하면 결과가 같다. 적응 그룹: 개선 여지가 크면 그룹을 늘린다."""
+    from sts2ai.agents import CombatPolicy
+    from sts2ai.encoders import SharedEmbeddings
+    from sts2ai.train.grpo import group_gap, rollout_group
+
+    run = ToyRun()
+    run.reset(3)
+    rng = np.random.default_rng(0)
+    run.choose_node(run.map_choices()[0])
+    assert run.phase == PHASE_COMBAT
+    vocab = run.vocab
+    policy = CombatPolicy(SharedEmbeddings(vocab, 32))
+    g = rollout_group(run, policy, None, 4, np.random.default_rng(1), crn=True, adapt_max=12, adapt_eps=-1.0)
+    assert len(g) == 12  # eps < 0 이면 늘 더 싸워 본다
+    g2 = rollout_group(run, policy, None, 4, np.random.default_rng(1), crn=True, adapt_max=12, adapt_eps=10.0)
+    assert len(g2) == 4  # 개선 여지가 eps 보다 작으면 늘리지 않는다
+    assert group_gap(g) >= 0.0 and group_gap(g, 4) >= 0.0
+
+
+def test_focus_train_stops_on_validation():
+    """집중 학습: 같은 전투 상태에서 학습용 시드로 업데이트하고, 검증 점수가 안 오르면 멈춘다 (최대 focus_rounds)."""
+    from sts2ai.agents import CombatPolicy
+    from sts2ai.encoders import SharedEmbeddings
+    from sts2ai.train.grpo import focus_train
+    from sts2ai.train.loop import Config
+
+    run = ToyRun()
+    run.reset(5)
+    rng = np.random.default_rng(0)
+    run.choose_node(run.map_choices()[0])
+    assert run.phase == PHASE_COMBAT
+    token = run.snapshot()
+    policy = CombatPolicy(SharedEmbeddings(run.vocab, 32))
+    optim = torch.optim.Adam(policy.parameters(), lr=1e-3)
+    cfg = Config(group_size=4, focus_rounds=3, focus_train_seeds=2, focus_val_seeds=2, focus_eps=0.0)
+    out = focus_train(policy, optim, run, token, None, cfg, rng, [], trace=True, other_tokens=[token])
+    assert 1 <= out["rounds"] <= 3 and out["val_gain"] >= 0.0
+    tr = out["trace"]["rounds"]
+    assert len(tr) == out["rounds"] + 1  # 처음 + 업데이트마다 한 번씩 검증
+    assert len(tr[0]["same_seed"]) == 4 and all(f["actions"] for f in tr[0]["same_seed"])
+    assert all("train" in r for r in tr[:-1])
+    assert out["others"] == 1 and all("other" in r for r in tr[1:])  # 다른 전투 검증 점수도 라운드마다
+
+
+def test_focus_train_rolls_back_to_best_round():
+    """집중 학습: 마지막 업데이트가 검증 점수를 낮춰도, 멈출 때 가장 좋았던 라운드의 가중치로 되돌린다."""
+    from sts2ai.agents import CombatPolicy
+    from sts2ai.encoders import SharedEmbeddings
+    from sts2ai.train.grpo import focus_train
+    from sts2ai.train.loop import Config
+
+    run = ToyRun()
+    run.reset(5)
+    run.choose_node(run.map_choices()[0])
+    token = run.snapshot()
+    policy = CombatPolicy(SharedEmbeddings(run.vocab, 32))
+    before = {k: v.clone() for k, v in policy.state_dict().items()}
+    optim = torch.optim.SGD(policy.parameters(), lr=10.0)  # 업데이트를 크게 해서 정책을 망가뜨린다
+    cfg = Config(group_size=4, focus_rounds=1, focus_train_seeds=2, focus_val_seeds=2, focus_eps=1e9)
+    out = focus_train(policy, optim, run, token, None, cfg, np.random.default_rng(0), [])
+    assert out["val_gain"] == 0.0  # 검증 점수가 eps 넘게 오르지 않음 → 처음 가중치가 가장 좋음
+    assert all(torch.equal(before[k], v) for k, v in policy.state_dict().items())
+
+
+def test_upgrade_gains_per_card():
+    """휴식 장소: 강화 선택지마다 그 카드를 강화한 덱의 가치 상승. 쉬기는 0, 이미 강화된 카드는 0."""
+    from sts2ai.agents.deck_builder import DeckBuilder, builder_state
+    from sts2ai.train.deckbuild import _builder_states, upgrade_gains
+
+    vocab = ToyRun().vocab
+    torch.manual_seed(0)
+    builder = DeckBuilder(vocab, 32)
+
+    class Run(_FakeRun):
+        def deck_raw(self):
+            return [(1, False), (2, False), (3, True)]
+
+        def card_raw(self, vid):
+            return vid - 1
+
+    run = Run(vocab)
+    deck = [run.raw_card(c, u) for c, u in run.deck_raw()]
+    st = builder_state(deck, [], 0, 80, 0, 3, 1, horizon=5, hp=60)
+    targets = [(1, 1.0, 5)]
+    opts = [S.ChoiceOption(action=0, kind="rest.heal"),
+            S.ChoiceOption(action=1, kind="rest.smith", deck_index=0),
+            S.ChoiceOption(action=2, kind="rest.smith", deck_index=1),
+            S.ChoiceOption(action=3, kind="rest.smith", deck_index=2)]
+    g = upgrade_gains(builder, run, st, targets, opts)
+
+    def D(raw):
+        with torch.no_grad():
+            return float(builder.values(_builder_states(st, targets, deck=[run.raw_card(c, u) for c, u in raw]))[0])
+
+    base = D(run.deck_raw())
+    assert g[0] == 0.0 and g[3] == 0.0
+    assert abs(g[1] - (D([(1, True), (2, False), (3, True)]) - base)) < 1e-5
+    assert abs(g[2] - (D([(1, False), (2, True), (3, True)]) - base)) < 1e-5
+
+
+def test_score_outcomes_graded_deaths():
+    """진 분기: 적을 더 깎을수록 점수가 높고, 이긴 분기보다는 늘 낮다. 모두 져도 이긴 그룹보다 높지 않다 (같은 척도)."""
+    from sts2ai.train.grpo import Trajectory, score_outcomes
+
+    run = ToyRun()
+    run.reset(5)
+    run.choose_node(run.map_choices()[0])
+    o = run.combat_obs()
+    base = run.run_state()
+    agent = Agent(run.vocab, 32)
+
+    def tr(won, frac, hp=10):
+        oo = S.CombatObs(**{**o.__dict__, "feats": o.feats.copy()})
+        if len(oo.enemy_tokens):
+            oo.feats[oo.enemy_tokens, S.F_ENEMY_HP_FRAC] = frac
+        return Trajectory(obs=[oo], won=won, hp=hp)
+
+    mixed = score_outcomes(agent.evaluator, base, [tr(True, 0.0), tr(False, 0.2), tr(False, 0.9)], run.vocab)
+    assert mixed[0] > mixed[1] > mixed[2]
+    all_dead = score_outcomes(agent.evaluator, base, [tr(False, 0.2), tr(False, 0.9)], run.vocab)
+    assert all_dead[0] > all_dead[1]
+    assert max(all_dead) < mixed[0]  # 모두 진 그룹이 이긴 분기보다 높지 않다
+    warm = score_outcomes(None, base, [tr(True, 0.0), tr(False, 0.2), tr(False, 0.9)], run.vocab)
+    assert warm[0] > warm[1] > warm[2]
