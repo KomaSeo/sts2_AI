@@ -338,7 +338,7 @@ def enemy_text(e: dict) -> str:
 
 def fight_text(rec: dict) -> str:
     head = (f"{'승리' if rec['won'] else '패배'} · {', '.join(rec.get('enemy_names', [])) or rec['encounter']} "
-            f"(적 {rec['encounter']}, 막{rec['sim_act']}, {rec['kind']}) · "
+            f"(적 {rec['encounter']}, {SIM_ACT_TO_ACT.get(rec['sim_act'], rec['sim_act'])}막·지역{rec['sim_act']}, {rec['kind']}) · "
             f"HP {rec['hp_start']}/{rec['max_hp']} → {rec['hp_end']} · 점수 {rec['score']} · "
             f"덱 {len(rec['deck'])}장")
     lines = [head, "  덱: " + ", ".join(rec["deck"]), "  포션: " + (", ".join(rec["potions"]) or "없음"),

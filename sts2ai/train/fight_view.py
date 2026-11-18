@@ -29,6 +29,14 @@ def load(folder: Path) -> list[tuple[int, list[dict]]]:
 LOC_DIR = Path(os.environ.get("STS2_LOC", r"C:\Users\Ic_Lab\sts2_scratch\loc"))
 _LOC_FILES = {"card": ("cards", ".title"), "relic": ("relics", ".title"), "potion": ("potions", ".title"),
               "monster": ("monsters", ".name"), "intent": ("intents", ".title")}
+# 시뮬레이터 막 번호는 지역 번호다: 1 과성장·2 지하 선착장(둘 다 1 막), 3 군락(2 막), 4 영광(3 막)
+ACT_LABEL = {1: "1막 · 과성장", 2: "1막 · 지하 선착장", 3: "2막 · 군락", 4: "3막 · 영광"}
+
+
+def act_label(rec: dict) -> str:
+    return ACT_LABEL.get(rec["sim_act"], f"지역 {rec['sim_act']}")
+
+
 KIND_KO = {"Weak": "약한 적", "Normal": "일반", "Elite": "엘리트", "Boss": "보스"}
 # 카드 고르기 화면 종류 (시뮬레이터 CardSelectionKind). 게임 문구가 없어 직접 옮겼다.
 SELECT_KO = {
@@ -145,7 +153,7 @@ def names(cat: str, xs) -> str:
 
 
 def head(rec: dict) -> str:
-    return (f"{'승리' if rec['won'] else '패배'} · {who(rec)} (막 {rec['sim_act']}, {kind_ko(rec)}) · "
+    return (f"{'승리' if rec['won'] else '패배'} · {who(rec)} ({act_label(rec)}, {kind_ko(rec)}) · "
             f"HP {rec['hp_start']}/{rec['max_hp']} → {rec['hp_end']} · 점수 {rec['score']}")
 
 
@@ -187,7 +195,7 @@ def fight_html(r: dict) -> str:
             f'<td class="top">{top}</td></tr>')
     cls = "win" if r["won"] else "loss"
     return f"""<section class="fight {cls}">
-<h3><span class="tag">{'승리' if r['won'] else '패배'}</span> {e(who(r))} · 막 {r['sim_act']} · {e(kind_ko(r))}
+<h3><span class="tag">{'승리' if r['won'] else '패배'}</span> {e(who(r))} · {e(act_label(r))} · {e(kind_ko(r))}
  <small>HP {r['hp_start']}/{r['max_hp']} → {r['hp_end']} · 점수 {r['score']} · 행동 {len(r['steps'])}번</small></h3>
 <details><summary>덱 {len(r['deck'])}장 · 포션 {len(r['potions'])}개 · 유물 {len(r.get('relics', []))}개</summary>
 <p>{e(names('card', r['deck']))}</p><p>포션: {e(names('potion', r['potions']))}</p>

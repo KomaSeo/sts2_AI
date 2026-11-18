@@ -1037,3 +1037,14 @@
     - 회귀 테스트를 넣었다.
   - 학습: runs/combat_only_v8 (11M) 을 반복 6 에서 끊고, 같은 설정 + 이 유물 방식으로 runs/combat_only_v9 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, scripts/upper_bound.py, scripts/unwinnable_check.py, tests/test_combat_only.py
+
+### 2026-11-18 · 전투 기록의 "막 4" 표시를 실제 막·지역 이름으로
+- 출처: [사용자 지시] / 표시 방식은 [AI 임의 결정]
+- 사용자 원문: "잠깐 막 4가 왜 있지?"
+- 이유: 이유 미기재.
+- 내용
+  - 시뮬레이터의 막 번호는 지역 번호다: 1 과성장, 2 지하 선착장(둘 다 1 막), 3 군락(2 막), 4 영광(3 막).
+  - 기록 페이지가 이 번호를 "막 4" 로 그대로 보여 줬다. 이제 "3막 · 영광" 처럼 보여 준다.
+  - 학습 쪽 계산(유물 고르기 등)은 이미 SIM_ACT_TO_ACT 로 바꿔 쓰고 있었다.
+  - runs/combat_only_v9 은 체크포인트로 이어 달린다.
+- 관련 파일: sts2ai/train/fight_view.py, sts2ai/train/combat_only.py
