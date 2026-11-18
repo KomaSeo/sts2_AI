@@ -83,3 +83,23 @@ def test_act_relics_follow_ancients():
             assert sum(x in (20, 21) for x in r) == (1 if act >= 3 else 0)
             rest = [x for x in r if x not in (1, 2, 10, 11, 20, 21)]
             assert len(rest) <= 12 * act
+
+
+def test_act_deck_sizes_and_curses():
+    from sts2ai.train.combat_only import sample_scenario
+
+    cfg = CombatConfig(deck_scheme="acts")
+    starters = [(10, 0, 5), (11, 0, 5), (12, 0, 1)]
+    rng = np.random.default_rng(3)
+    for sim_act, act in ((1, 1), (3, 2), (4, 3)):
+        for _ in range(300):
+            sc = sample_scenario(rng, cfg, [1, 2, 3, 10, 11, 12], [7], (5, sim_act, "Normal"), starters=starters,
+                                 curses=[90, 91])
+            ids = [c for c, _ in sc.deck]
+            n_curse = sum(c in (90, 91) for c in ids)
+            n_start = sum(c in (10, 11, 12) for c in ids)
+            n_extra = len(ids) - n_curse - n_start
+            assert 0 <= n_curse <= 6
+            assert n_extra <= max(9 * act, 5)
+            assert n_start + n_extra >= 5
+            assert all(not up for c, up in sc.deck if c in (90, 91))
