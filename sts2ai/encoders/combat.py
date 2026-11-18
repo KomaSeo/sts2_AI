@@ -27,6 +27,7 @@ class CombatEncoder(nn.Module):
         # 공유 임베딩에 없는 것: 오브 종류, 캐릭터 자원 종류 (전투에서만 쓰인다)
         self.orb = nn.Embedding(S.N_ORB_KINDS, d, padding_idx=0)
         self.resource = nn.Embedding(S.N_RESOURCE_KINDS, d, padding_idx=0)
+        self.selection = nn.Embedding(S.N_SELECTION_KINDS, d, padding_idx=0)  # 카드 고르기 화면 종류
         self.feat = nn.Linear(S.N_COMBAT_FEATURES, d)
         self.run_proj = nn.Linear(d, d)
         self.body = set_transformer(d, layers, heads)
@@ -52,6 +53,7 @@ class CombatEncoder(nn.Module):
             + table(e.encounter, (S.TYPE_GLOBAL,))
             + table(self.orb, (S.TYPE_ORB,))
             + table(self.resource, (S.TYPE_RESOURCE,))
+            + table(self.selection, (S.TYPE_SELECTION,))
         )
 
     def forward(self, batch: dict, run_vec: torch.Tensor | None = None) -> torch.Tensor:

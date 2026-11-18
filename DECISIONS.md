@@ -876,3 +876,26 @@
   - 설정은 starter_cards = "StrikeIronclad:0-5,DefendIronclad:0-5,Bash:0-1" (시뮬레이터 카드 이름).
   - 학습: 검증 전투도 바뀌어서 runs/combat_only_v4 를 끊고 runs/combat_only_v5 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/train/combat_only.py, tests/test_combat_only.py
+
+### 2026-11-18 · 전투 관측에 카드 고르기 화면 종류 토큰 (v6)
+- 출처: [AI 제안 → 사용자 승인]
+- 사용자 원문: "혹시 고를 때, 지금 이게 왜 고르는지 예를 들면 지금 고르고 있는 카드가 강화되고 있는 건지 소멸되고 있는건지 알려지나?" / (제안에) "yes"
+- 이유: 이유 미기재.
+- 내용
+  - 원래 상태
+    - 시뮬레이터 관측에 카드 고르기 화면 종류(SELECTION_KIND, 27 가지)가 있다.
+    - 하지만 combat_tokens 는 화면이 열렸는지만 썼다. 그래서 정책은 강화를 위해 고르는지 소멸을 위해 고르는지 몰랐다. 기록에도 남지 않았다.
+  - 고친 것
+    - 새 토큰 종류 TYPE_SELECTION(20) 을 만들었다. 화면이 열려 있으면 어댑터가 맨 뒤에 하나 붙인다 (ids = CardSelectionKind).
+    - 전투 인코더에 고르기 종류 임베딩(32)을 넣었다.
+    - 행동 토큰 1+i 규약은 그대로다.
+    - 확인: 전투장비 → 손패 강화, 진정한 끈기+ → 손패 소멸, 불타는 조약 → 손패 소멸 후 뽑기, 비밀 무기 → 뽑을 더미 → 손패.
+  - 기록·보기
+    - 행동마다 고르기 종류를 남긴다.
+    - 페이지에는 "고르기(손패 강화): 타격" 처럼 보인다.
+    - 종류 이름의 한국어는 게임 문구가 없어서 직접 옮겼다. — [AI 임의 결정]
+  - 영향
+    - 토큰 종류 수가 20 → 21 로 늘었다.
+    - 예전 가중치는 _adapt_state 가 늘어난 줄만 초기값으로 채워 읽는다. 새 임베딩은 초기값이다.
+  - 학습: runs/combat_only_v5 를 끊고 runs/combat_only_v6 에서 처음부터 다시 학습한다.
+- 관련 파일: sts2ai/schema.py, sts2ai/encoders/combat.py, sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, sts2ai/train/fight_view.py

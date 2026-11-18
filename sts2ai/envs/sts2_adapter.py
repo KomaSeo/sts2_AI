@@ -206,8 +206,11 @@ class _Lib:
                 ids[ti] = self.potion_index.get(int(obs[ct.POTION_OFFSET + slot * 2]), 0)
             tok.ids = ids
         enchants = self._fill_cards(handle, tok)
-        # 오브·캐릭터 자원 토큰을 맨 뒤에 붙인다 (행동 토큰 1+i 와 적 토큰 위치는 그대로)
+        # 오브·캐릭터 자원 토큰, 카드 고르기 화면 종류 토큰을 맨 뒤에 붙인다 (행동 토큰 1+i 와 적 토큰 위치는 그대로)
         extra = self.resource_tokens(handle)
+        sel_kind = int(obs[ct.SELECTION_KIND_OFFSET])
+        if sel_kind:
+            extra = extra + [(S.TYPE_SELECTION, min(sel_kind, S.N_SELECTION_KINDS - 1), {})]
         if extra:
             feats_x = np.zeros((len(extra), tok.feats.shape[1]), dtype=tok.feats.dtype)
             for r, (_, _, f) in enumerate(extra):

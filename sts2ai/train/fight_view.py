@@ -30,6 +30,22 @@ LOC_DIR = Path(os.environ.get("STS2_LOC", r"C:\Users\Ic_Lab\sts2_scratch\loc"))
 _LOC_FILES = {"card": ("cards", ".title"), "relic": ("relics", ".title"), "potion": ("potions", ".title"),
               "monster": ("monsters", ".name"), "intent": ("intents", ".title")}
 KIND_KO = {"Weak": "약한 적", "Normal": "일반", "Elite": "엘리트", "Boss": "보스"}
+# 카드 고르기 화면 종류 (시뮬레이터 CardSelectionKind). 게임 문구가 없어 직접 옮겼다.
+SELECT_KO = {
+    "DiscardToDrawPileTop": "버린 카드 → 뽑을 더미 맨 위", "ExhaustFromHand": "손패 소멸",
+    "ExhaustFromHandThenDraw": "손패 소멸 후 뽑기", "DrawPileToHand": "뽑을 더미 → 손패",
+    "HandToDrawPileTop": "손패 → 뽑을 더미 맨 위", "ExhaustFromHandRepeated": "손패 소멸 (여러 장)",
+    "GeneratedCardToHand": "새 카드 하나 가져오기", "CurseOfKnowledge": "지식의 저주 고르기",
+    "DiscardFromHandRepeated": "손패 버리기 (여러 장)", "MarkHandCardSly": "손패에 교활 표시",
+    "QueueHandCardCopies": "손패 카드 복사", "RetainForNextTurn": "다음 턴까지 보존",
+    "DiscardToHand": "버린 카드 → 손패", "DiscardAnyThenDraw": "버리고 뽑기", "UpgradeInHand": "손패 강화",
+    "TransformDrawPileToSoul": "뽑을 더미 카드를 영혼으로", "ExhaustFromDrawPile": "뽑을 더미 소멸",
+    "GrantEtherealInHand": "손패에 휘발성 부여", "TransfigureInHand": "손패 변형",
+    "TransformHandToMinionStrike": "손패를 하수인 타격으로", "TransformDrawToMinionDiveBomb": "뽑을 더미를 하수인 급강하로",
+    "TransformHandToMinionSacrifice": "손패를 하수인 희생으로", "AutoPlaySkillThrice": "스킬 세 번 자동 사용",
+    "CloneColorlessInHand": "무색 카드 복제", "DualWield": "이도류 (복제)", "DiscardToHandFree": "버린 카드 → 손패 (무료)",
+    "FreeCardForCombat": "이번 전투 동안 무료로",
+}
 
 
 def _norm(s: str) -> str:
@@ -61,13 +77,17 @@ def ko(cat: str, name: str) -> str:
     return _tables().get(cat, {}).get(_norm(base), base) + plus
 
 
-def ko_action(s: str) -> str:
-    """행동 이름: "카드 → 적0", "포션: 이름 → 적0", "고르기: 카드", "턴 종료", "고르지 않기"."""
+def ko_action(s: str, select: str | None = None) -> str:
+    """행동 이름: "카드 → 적0", "포션: 이름 → 적0", "고르기: 카드", "턴 종료", "고르지 않기".
+    select(카드 고르기 화면 종류)가 있으면 "고르기(손패 강화): 카드" 처럼 붙인다."""
     act, _, target = s.partition(" → ")
+    why = f"({SELECT_KO.get(select, select)})" if select else ""
     if act.startswith("포션: "):
         act = "포션: " + ko("potion", act[len("포션: "):])
     elif act.startswith("고르기: "):
-        act = "고르기: " + ko("card", act[len("고르기: "):])
+        act = f"고르기{why}: " + ko("card", act[len("고르기: "):])
+    elif act == "고르지 않기" and why:
+        act = f"고르지 않기{why}"
     elif act not in ("턴 종료", "고르지 않기"):
         act = ko("card", act)
     return act + (f" → {target.replace('적', '적 ')}" if target else "")
@@ -132,10 +152,10 @@ def to_md(it: int, recs: list[dict]) -> str:
                   "| 턴 | HP | 방어 | 에너지 | 적 (HP · 이번 턴 행동) | 손패 (비용) | 고른 행동 | 확률 | 확률 높은 행동 3개 |",
                   "|---|---|---|---|---|---|---|---|---|"]
         for s in r["steps"]:
-            top = " / ".join(f"{ko_action(n)} {p}%" for n, p in s["top"])
+            top = " / ".join(f"{ko_action(n, s.get('select'))} {p}%" for n, p in s["top"])
             lines.append(f"| {s['turn']} | {s['hp']} | {s.get('block', '')} | {s['energy']} | "
                          f"{'<br>'.join(enemy_str(e) for e in enemies_of(s))} | {hand_str(s)} | "
-                         f"{ko_action(s['action'])} | {s['prob_pct']}% | {top} |")
+                         f"{ko_action(s['action'], s.get('select'))} | {s['prob_pct']}% | {top} |")
         lines.append("")
     return "\n".join(lines)
 
@@ -148,7 +168,7 @@ def fight_html(r: dict) -> str:
             band ^= 1
             prev_turn = s["turn"]
         chosen = s["action"].split(" → ")[0]
-        top = "".join(f'<span class="alt{" chosen" if n == chosen else ""}">{e(ko_action(n))} '
+        top = "".join(f'<span class="alt{" chosen" if n == chosen else ""}">{e(ko_action(n, s.get("select")))} '
                       f'<b>{p}%</b></span>' for n, p in s["top"])
         p = s["prob_pct"]
         rows.append(
@@ -156,7 +176,7 @@ def fight_html(r: dict) -> str:
             f'<td class="n">{s.get("block", "")}</td><td class="n">{s["energy"]}</td>'
             f'<td class="en">{"<br>".join(e(enemy_str(x)) for x in enemies_of(s))}</td>'
             f'<td class="hand">{hand_html(s)}</td>'
-            f'<td class="act" title="{e(s["action"])}">{e(ko_action(s["action"]))}</td>'
+            f'<td class="act" title="{e(s["action"])}">{e(ko_action(s["action"], s.get("select")))}</td>'
             f'<td class="pr"><div class="bar"><i style="width:{min(100, p)}%"></i></div><span>{p}%</span></td>'
             f'<td class="top">{top}</td></tr>')
     cls = "win" if r["won"] else "loss"

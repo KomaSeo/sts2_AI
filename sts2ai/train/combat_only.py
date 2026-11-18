@@ -205,6 +205,7 @@ def fight_record(policy, run, t: Trajectory, sc: Scenario, top: int = 3) -> dict
         return run.action_token_name(int(o.types[1 + i]), int(o.ids[1 + i]))
 
     enemy_names, intent_names = _name_tables(run)
+    sel_names = run.lib.names.card_selection_kinds()
 
     def hand(o):
         """손패: [이름(+ 강화), 지금 비용, 낼 수 있나]. 비용 칸은 비용/5."""
@@ -247,6 +248,8 @@ def fight_record(policy, run, t: Trajectory, sc: Scenario, top: int = 3) -> dict
             "hp": int(round(float(g[S.F_HP]) * sc.max_hp)),  # 전역 토큰의 HP 칸 = HP / 최대 HP
             "energy": int(round(float(g[S.F_ENERGY]) * 10)),  # 에너지 / 10
             "block": int(round(float(g[S.F_BLOCK]) * 50)),
+            "select": sel_names.get(int(o.ids[np.flatnonzero(o.types == S.TYPE_SELECTION)[0]]), "?")
+            if (o.types == S.TYPE_SELECTION).any() else None,  # 카드 고르기 화면 종류 (CardSelectionKind)
             "enemies": enemies(o),
             "hand": hand(o),
             "action": name(o, a) + (f" → 적{int(o.enemy_slots[tg])}" if tg >= 0 else ""),

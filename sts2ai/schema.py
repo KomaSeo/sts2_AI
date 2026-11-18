@@ -203,7 +203,11 @@ TYPE_RUN = 17  # 런 맥락(맵 포함) 토큰. CombatEncoder 가 맨 뒤에 붙
 # 어댑터가 붙이는 토큰 (combat_tokens 에는 없다)
 TYPE_ORB = 18  # 오브 하나: ids = 오브 종류 + 1, F_MAGNITUDE = 패시브 값, F_INTENT_MAG = 발동 값
 TYPE_RESOURCE = 19  # 캐릭터 자원 하나: ids = RESOURCE_* 종류, 값은 F_MAGNITUDE (오스티는 HP 칸)
-N_TOKEN_TYPES = 20
+# 카드 고르기 화면이 열려 있을 때 하나: ids = 시뮬레이터 CardSelectionKind (1 손패 소멸, 15 손패 강화 …).
+# 무엇을 위해 고르는지(강화인지 소멸인지)를 정책이 알게 한다. combat_tokens 는 화면이 열렸는지만 쓴다.
+TYPE_SELECTION = 20
+N_TOKEN_TYPES = 21
+N_SELECTION_KINDS = 32
 RESOURCE_GOLD, RESOURCE_MAX_ENERGY, RESOURCE_ORB_SLOTS, RESOURCE_STARS, RESOURCE_OSTY = 1, 2, 3, 4, 5
 N_RESOURCE_KINDS = 8
 N_ORB_KINDS = 16
