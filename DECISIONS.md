@@ -1204,3 +1204,18 @@
     - HP 5 로 보스전에서 턴을 넘기면 HP 0 → 요정이 최대 HP 의 30%(24)로 살리고 요정이 사라진다.
   - 학습: runs/combat_only_v16 을 반복 22 에서 끊고 runs/combat_only_v17 에서 처음부터 다시 학습한다 (설정은 v16 과 같다).
 - 관련 파일: 저장소 밖 (../sts2/src/Sts2Emulator/Core/CombatEngine.cs, ../sts2/out)
+
+### 2026-11-19 · 전투 관측에 최대 포션 칸 토큰 (v18)
+- 출처: [AI 제안 → 사용자 승인]
+- 사용자 원문: "잠깐 총 포션 슬롯 갯수가 안들어가?" / (자원 토큰으로 넣자는 제안에) "yes"
+- 이유: 이유 미기재. 앞선 대화에서 최대 포션 칸에 따라 엔트로피 포션의 가치가 달라진다는 이야기가 있었다.
+- 내용
+  - 원래 상태: 포션이 하나라도 있으면 포션 칸 토큰은 늘 9 개였다. 빈 칸이 쓸 수 있는 칸인지 알 수 없었고, 최대 칸 수는 관측에 없었다.
+  - 시뮬레이터에 Sts2_GetMaxPotionSlots(handle) 를 넣었다. 전투의 MaxPotionSlots 를 배열 크기로 자른 값이다.
+    - 자원 함수(Sts2_GetResources)의 배치는 건드리지 않았다. — [AI 임의 결정]
+  - 자원 토큰 RESOURCE_POTION_SLOTS(8) 을 붙인다. F_MAGNITUDE = 칸/10.
+  - N_RESOURCE_KINDS 8 → 10. 자원 임베딩이 커져서 처음부터 다시 학습한다.
+  - 런 학습 관측에도 같이 들어간다.
+  - 확인: 칸 3·5·9 시나리오에서 토큰 값 3·5·9. 테스트 48 개 통과.
+  - 학습: runs/combat_only_v17 을 반복 4 에서 끊고 runs/combat_only_v18 에서 처음부터 다시 학습한다 (설정은 v17 과 같다).
+- 관련 파일: sts2ai/schema.py, sts2ai/envs/sts2_adapter.py, 저장소 밖 (../sts2/src/Sts2Emulator/Interop/NativeExports.cs, ../sts2/out)

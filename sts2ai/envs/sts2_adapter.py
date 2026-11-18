@@ -86,6 +86,7 @@ class _Lib:
         # 적 의도마다 때리는 횟수 [주 의도, 함께 하는 의도] × 적 슬롯, 고르기 화면 후보 전부 [(카드 id, 강화)]
         self._intent_hits = bind("Sts2_GetIntentHits", [ctypes.c_int, ip, ctypes.c_int])
         self._selection = bind("Sts2_GetSelectionCandidates", [ctypes.c_int, ip, ctypes.c_int])
+        self._max_potion_slots = bind("Sts2_GetMaxPotionSlots", [ctypes.c_int])  # 쓸 수 있는 포션 칸 수
         self.cards = names.cards()
         # 날개 달린 부츠: 유물 카운터 = 이미 쓴 이동 횟수, 3 번 쓰면 끝 (RunConstants.WingedBootsTravels)
         self.winged_boots = next((rid for rid, n in names.relics().items() if n.replace(" ", "") == "WingedBoots"), None)
@@ -206,6 +207,9 @@ class _Lib:
         stars, osty, osty_max, orb_cap, max_energy, gold, n_orbs = (buf[i] for i in range(7))
         out = [(S.TYPE_RESOURCE, S.RESOURCE_GOLD, {S.F_MAGNITUDE: gold / 300.0}),
                (S.TYPE_RESOURCE, S.RESOURCE_MAX_ENERGY, {S.F_MAGNITUDE: max_energy / 10.0})]
+        if self._max_potion_slots is not None:
+            out.append((S.TYPE_RESOURCE, S.RESOURCE_POTION_SLOTS,
+                        {S.F_MAGNITUDE: self._max_potion_slots(handle) / 10.0}))
         if orb_cap:
             out.append((S.TYPE_RESOURCE, S.RESOURCE_ORB_SLOTS, {S.F_MAGNITUDE: orb_cap / 10.0}))
         if stars:

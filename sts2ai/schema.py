@@ -211,7 +211,9 @@ N_SELECTION_KINDS = 32
 RESOURCE_GOLD, RESOURCE_MAX_ENERGY, RESOURCE_ORB_SLOTS, RESOURCE_STARS, RESOURCE_OSTY = 1, 2, 3, 4, 5
 # 내 실제 HP·최대 HP (F_MAGNITUDE = 값/100). 전역 토큰에는 HP 비율만 있다.
 RESOURCE_HP, RESOURCE_MAX_HP = 6, 7
-N_RESOURCE_KINDS = 8
+# 쓸 수 있는 최대 포션 칸 (F_MAGNITUDE = 칸/10). 포션 칸 토큰은 늘 9 개라 빈 칸이 쓸 수 있는 칸인지 몰랐다.
+RESOURCE_POTION_SLOTS = 8
+N_RESOURCE_KINDS = 10
 N_ORB_KINDS = 16
 
 # 토큰 종류별로 ids 가 어느 임베딩 테이블을 가리키는지
