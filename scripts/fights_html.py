@@ -104,50 +104,93 @@ def fight_html(r: dict) -> str:
 
 
 CSS = """
-:root{--bg:#fafaf9;--fg:#1c1917;--mut:#78716c;--line:#e7e5e4;--card:#fff;--b1:#f5f5f4;--win:#15803d;--loss:#b91c1c;--acc:#2563eb}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--mut:#a8a29e;--line:#44403c;--card:#292524;--b1:#24201e;--win:#4ade80;--loss:#f87171;--acc:#60a5fa}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,"Malgun Gothic",sans-serif}
-header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;z-index:1}
-h1{font-size:16px;margin:0}select,button{font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
-main{padding:16px;max-width:1200px;margin:auto}.iter{display:none}.iter.on{display:block}
-.fight{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px}
-h3{margin:0 0 6px;font-size:15px}h3 small{color:var(--mut);font-weight:normal;margin-left:6px}
-.tag{display:inline-block;padding:0 8px;border-radius:10px;color:#fff;font-size:12px;margin-right:6px}
-.win .tag{background:var(--win)}.loss .tag{background:var(--loss)}details{color:var(--mut);margin-bottom:8px}details p{margin:4px 0}
-.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
-th{color:var(--mut);font-weight:600}.n{text-align:right;font-variant-numeric:tabular-nums}tr.b1{background:var(--b1)}
-.pr{display:flex;align-items:center;gap:6px}.bar{width:60px;height:6px;background:var(--line);border-radius:3px;overflow:hidden}.bar i{display:block;height:100%;background:var(--acc)}
-.pr span{font-variant-numeric:tabular-nums;min-width:44px;text-align:right}.top{color:var(--mut)}td.en{font-size:12px;line-height:1.35}.alt{margin-right:10px}.alt.chosen{color:var(--fg)}
+/* 레이아웃: 위에 고정된 반복 선택 막대, 아래로 전투 카드(승리·패배) 두 장, 카드 안은 가로 스크롤 표 */
+:root{--bg:#f6f7f9;--fg:#1b2430;--mut:#5d6878;--line:#dde2e8;--card:#ffffff;--band:#eef1f5;
+--win:#1d7a46;--loss:#b4322b;--acc:#2f6fb3;--accsoft:#d5e3f3;
+--f-body:"IBM Plex Sans KR",system-ui,"Malgun Gothic",sans-serif;--f-num:"IBM Plex Mono",ui-monospace,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12161c;--fg:#e6eaf0;--mut:#98a3b3;--line:#2a313b;--card:#1a2028;--band:#161b22;
+--win:#4fbf7f;--loss:#ec6a60;--acc:#6fa6e0;--accsoft:#22344a;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#12161c;--fg:#e6eaf0;--mut:#98a3b3;--line:#2a313b;--card:#1a2028;--band:#161b22;
+--win:#4fbf7f;--loss:#ec6a60;--acc:#6fa6e0;--accsoft:#22344a;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--f-body)}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);border-bottom:1px solid var(--line);
+padding-block:10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.hrow{max-width:1240px;margin:0 auto;display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap}
+h1{font-size:16px;margin:0;text-wrap:balance}.hint{color:var(--mut);font-size:12px;flex-basis:100%}
+.nav{display:flex;gap:6px;align-items:center}
+select,button{font:inherit;padding:4px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+main{max-width:1240px;margin:0 auto;padding-block:16px 32px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:16px}
+.iter[hidden]{display:none}.iter{display:grid;gap:16px;min-width:0}
+.fight{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);border-radius:8px;padding:12px 14px;min-width:0;display:grid;gap:8px}
+.win{--c:var(--win)}.loss{--c:var(--loss)}
+h3{margin:0;font-size:15px;text-wrap:balance}h3 small{display:block;color:var(--mut);font-weight:400;font-size:12.5px;font-family:var(--f-num)}
+.tag{color:var(--c);font-weight:700;margin-right:6px}
+details{color:var(--mut);font-size:13px}details p{margin:4px 0;line-height:1.55}summary{cursor:pointer}
+.scroll{overflow-x:auto;min-width:0}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px;letter-spacing:.02em;position:sticky;top:0;background:var(--card)}
+.n{text-align:right;font-family:var(--f-num);font-variant-numeric:tabular-nums}tr.b1 td{background:var(--band)}
+td.en{font-size:12px;line-height:1.4}
+.pr{display:flex;align-items:center;gap:6px}.bar{width:56px;height:6px;background:var(--accsoft);border-radius:3px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--acc)}.pr span{font-family:var(--f-num);font-variant-numeric:tabular-nums;min-width:46px;text-align:right}
+.top{color:var(--mut);font-size:12px}.alt{margin-right:10px}.alt b{font-family:var(--f-num);font-weight:500}.alt.chosen{color:var(--fg)}
+.empty{color:var(--mut)}
 """
 
+FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500'
+         '&family=IBM+Plex+Sans+KR:wght@400;600;700&display=swap">')
 
-def to_html(folder: Path, data: list[tuple[int, list[dict]]]) -> str:
+
+def body_html(folder: Path, data: list[tuple[int, list[dict]]]) -> str:
     opts = "".join(f'<option value="{it}">반복 {it}</option>' for it, _ in reversed(data))
-    secs = "".join(f'<div class="iter" id="it{it}"><h2 style="font-size:15px">반복 {it}</h2>'
-                   + "".join(fight_html(r) for r in recs) + "</div>" for it, recs in data)
-    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>전투 기록</title><style>{CSS}</style></head><body>
-<header><h1>전투 기록 · {html.escape(folder.name)}</h1><button id="prev">◀</button><select id="sel">{opts}</select>
-<button id="next">▶</button><span style="color:var(--mut)">반복마다 이긴 전투 하나, 진 전투 하나 · 확률은 그 전투를 싸운 가중치 기준</span></header>
-<main>{secs or '<p>아직 기록이 없습니다.</p>'}</main>
+    secs = "".join(f'<div class="iter" id="it{it}" hidden>' + "".join(fight_html(r) for r in recs) + "</div>"
+                   for it, recs in data)
+    return f"""<header><div class="hrow"><h1>전투 기록 · {html.escape(folder.name)}</h1>
+<div class="nav"><button id="prev" type="button" aria-label="이전 반복">◀</button><select id="sel" aria-label="반복 고르기">{opts}</select>
+<button id="next" type="button" aria-label="다음 반복">▶</button></div>
+<div class="hint">반복마다 이긴 전투 하나, 진 전투 하나. 확률은 그 전투를 싸운 가중치로 잰 값입니다.
+ 적 행동의 수치는 한 번 때리는 피해입니다 (여러 번 때리는지는 관측에 없음).</div></div></header>
+<main>{secs or '<p class="empty">아직 기록이 없습니다.</p>'}</main>
 <script>
 const sel=document.getElementById('sel');
-function show(v){{document.querySelectorAll('.iter').forEach(d=>d.classList.toggle('on',d.id==='it'+v));sel.value=v;}}
+function show(v){{document.querySelectorAll('.iter').forEach(d=>{{d.hidden=d.id!=='it'+v;}});sel.value=v;}}
 sel.onchange=()=>show(sel.value);
 document.getElementById('prev').onclick=()=>{{if(sel.selectedIndex<sel.options.length-1){{sel.selectedIndex++;show(sel.value);}}}};
 document.getElementById('next').onclick=()=>{{if(sel.selectedIndex>0){{sel.selectedIndex--;show(sel.value);}}}};
 if(sel.options.length)show(sel.options[0].value);
-</script></body></html>"""
+</script>"""
+
+
+def to_html(folder: Path, data: list[tuple[int, list[dict]]]) -> str:
+    """브라우저로 바로 여는 파일."""
+    return (f'<!doctype html><html lang="ko"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+            f'<title>전투 기록</title>{FONTS}<style>{CSS}</style></head><body>{body_html(folder, data)}</body></html>')
+
+
+def to_artifact(folder: Path, data: list[tuple[int, list[dict]]]) -> str:
+    """claude.ai 아티팩트로 올릴 내용 (문서 뼈대는 올릴 때 붙는다)."""
+    return (f'<title>{html.escape(folder.name)} 전투 기록</title>'
+            f'<meta name="claude:viewport-fit-sides" content="cover">{FONTS}<style>{CSS}</style>'
+            f'{body_html(folder, data)}')
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("folder")
     p.add_argument("--md", action="store_true", help="반복마다 fights/iter_NNNN.md 도 쓴다")
+    p.add_argument("--artifact", default="", help="아티팩트로 올릴 HTML 을 이 경로에 쓴다")
     args = p.parse_args()
     folder = Path(args.folder)
     data = load(folder)
     (folder / "fights.html").write_text(to_html(folder, data), encoding="utf-8")
+    if args.artifact:
+        Path(args.artifact).write_text(to_artifact(folder, data), encoding="utf-8")
     if args.md:
         for it, recs in data:
             (folder / "fights" / f"iter_{it:04d}.md").write_text(to_md(it, recs), encoding="utf-8")

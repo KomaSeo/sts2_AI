@@ -790,3 +790,17 @@
   - 학습: runs/combat_only_v1 은 반복 20 근처에서 끊었다. runs/combat_only_v2 에서 처음부터 다시 학습한다.
   - 영향: 포션 칸이 9 개가 되어 관측의 포션 토큰이 6 → 9 개다. 예전 런 학습 가중치(sts2_day*)도 토큰 기반이라 그대로 읽을 수 있다. 다만 9 칸 관측에서 다시 확인하지는 않았다.
 - 관련 파일: sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, scripts/fights_html.py, tests/test_combat_only.py, 저장소 밖 (../sts2/src/Sts2Emulator/Core/Run/RunConstants.cs, ../sts2/out)
+
+### 2026-11-18 · 전투 기록 페이지를 아티팩트로 올리기
+- 출처: [사용자 지시] / 디자인은 [AI 임의 결정]
+- 사용자 원문: "너가 돌려서 보여줘봐" / "아니 아까처럼 md나 HTML로"
+- 이유: 이유 미기재.
+- 내용
+  - fights_html.py 에 --artifact <경로> 를 넣었다. 문서 뼈대 없이 아티팩트로 올릴 HTML 을 쓴다.
+  - 같은 CSS 로 로컬 fights.html 도 고쳤다. — [AI 임의 결정]
+    - 밝은·어두운 테마 토큰.
+    - 글꼴 IBM Plex Sans KR / IBM Plex Mono.
+    - 승패를 카드 왼쪽 색 줄로 표시.
+    - 폰 너비에서는 표만 가로로 스크롤.
+  - 머리에 안내 문구를 넣었다: 적 행동 수치는 한 번 때리는 피해이고, 여러 번 때리는지는 관측에 없다.
+- 관련 파일: scripts/fights_html.py
