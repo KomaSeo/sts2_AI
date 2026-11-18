@@ -936,3 +936,11 @@
     - docs/combat_agent_outputs.html 을 새로 만들었다 (사용자 원문: "전투 agent의 output도 모두 나열해서 docs로 만들어").
   - 학습: runs/combat_only_v6 을 끊고 runs/combat_only_v7 에서 처음부터 다시 학습한다.
 - 관련 파일: sts2ai/schema.py, sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, sts2ai/train/fight_view.py, docs/combat_agent_inputs.html, docs/combat_agent_outputs.html, 저장소 밖 (../sts2/src/Sts2Emulator/Interop/NativeExports.cs, ../sts2/out)
+
+### 2026-11-18 · 글 전투 기록이 세 칸 의도에서 멈추던 버그 수정
+- 출처: [AI 임의 결정]
+- 이유
+  - v7 첫 반복에서 학습이 멈췄다. 적 의도가 [종류, 수치, 횟수] 세 칸이 됐는데, 글 기록(fight_text)만 두 칸으로 풀었다.
+  - 고쳤다. 세 칸을 처리하는 회귀 테스트도 넣었다.
+  - 1 반복을 실제로 돌려 확인한 뒤 runs/combat_only_v7 을 처음부터 다시 띄웠다.
+- 관련 파일: sts2ai/train/combat_only.py, tests/test_combat_only.py
