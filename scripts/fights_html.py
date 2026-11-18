@@ -49,6 +49,17 @@ def enemy_str(e: dict) -> str:
     return out
 
 
+def hand_str(s: dict) -> str:
+    return ", ".join(f"{n}({c})" for n, c, _ in s.get("hand", [])) if "hand" in s else "-"
+
+
+def hand_html(s: dict) -> str:
+    if "hand" not in s:
+        return '<span class="na">기록 없음</span>'
+    return "".join(f'<span class="card{"" if ok else " off"}">{html.escape(n)}<i>{c}</i></span>'
+                   for n, c, ok in s["hand"]) or '<span class="na">없음</span>'
+
+
 def who(rec: dict) -> str:
     return ", ".join(rec.get("enemy_names") or []) or f"적 {rec['encounter']}"
 
@@ -64,12 +75,12 @@ def to_md(it: int, recs: list[dict]) -> str:
         lines += [f"## {head(r)}", "", f"- 덱 {len(r['deck'])}장: " + ", ".join(r["deck"]),
                   "- 포션: " + (", ".join(r["potions"]) or "없음"),
                   "- 유물: " + (", ".join(r.get("relics", [])) or "없음"), "",
-                  "| 턴 | HP | 방어 | 에너지 | 적 (HP · 이번 턴 행동) | 고른 행동 | 확률 | 확률 높은 행동 3개 |",
-                  "|---|---|---|---|---|---|---|---|"]
+                  "| 턴 | HP | 방어 | 에너지 | 적 (HP · 이번 턴 행동) | 손패 (비용) | 고른 행동 | 확률 | 확률 높은 행동 3개 |",
+                  "|---|---|---|---|---|---|---|---|---|"]
         for s in r["steps"]:
             top = " / ".join(f"{n} {p}%" for n, p in s["top"])
             lines.append(f"| {s['turn']} | {s['hp']} | {s.get('block', '')} | {s['energy']} | "
-                         f"{'<br>'.join(enemy_str(e) for e in enemies_of(s))} | "
+                         f"{'<br>'.join(enemy_str(e) for e in enemies_of(s))} | {hand_str(s)} | "
                          f"{s['action']} | {s['prob_pct']}% | {top} |")
         lines.append("")
     return "\n".join(lines)
@@ -89,6 +100,7 @@ def fight_html(r: dict) -> str:
             f'<tr class="b{band}"><td class="n">{s["turn"]}</td><td class="n">{s["hp"]}</td>'
             f'<td class="n">{s.get("block", "")}</td><td class="n">{s["energy"]}</td>'
             f'<td class="en">{"<br>".join(e(enemy_str(x)) for x in enemies_of(s))}</td>'
+            f'<td class="hand">{hand_html(s)}</td>'
             f'<td class="act">{e(s["action"])}</td>'
             f'<td class="pr"><div class="bar"><i style="width:{min(100, p)}%"></i></div><span>{p}%</span></td>'
             f'<td class="top">{top}</td></tr>')
@@ -99,7 +111,7 @@ def fight_html(r: dict) -> str:
 <details><summary>덱 {len(r['deck'])}장 · 포션 {len(r['potions'])}개 · 유물 {len(r.get('relics', []))}개</summary>
 <p>{e(', '.join(r['deck']))}</p><p>포션: {e(', '.join(r['potions']) or '없음')}</p>
 <p>유물: {e(', '.join(r.get('relics', [])) or '없음')}</p></details>
-<div class="scroll"><table><thead><tr><th>턴</th><th>HP</th><th>방어</th><th>에너지</th><th>적 (HP · 이번 턴 행동)</th><th>고른 행동</th>
+<div class="scroll"><table><thead><tr><th>턴</th><th>HP</th><th>방어</th><th>에너지</th><th>적 (HP · 이번 턴 행동)</th><th>손패 (비용)</th><th>고른 행동</th>
 <th>확률</th><th>확률 높은 행동 3개</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>"""
 
 
@@ -135,6 +147,9 @@ th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;white-
 th{color:var(--mut);font-weight:600;font-size:12px;letter-spacing:.02em;position:sticky;top:0;background:var(--card)}
 .n{text-align:right;font-family:var(--f-num);font-variant-numeric:tabular-nums}tr.b1 td{background:var(--band)}
 td.en{font-size:12px;line-height:1.4}
+td.hand{white-space:normal;min-width:220px;max-width:360px}.na{color:var(--mut);font-size:12px}
+.card{display:inline-flex;align-items:baseline;gap:3px;font-size:12px;padding:0 6px;margin:1px 3px 1px 0;border:1px solid var(--line);border-radius:4px;background:var(--bg)}
+.card i{font-style:normal;font-family:var(--f-num);color:var(--acc);font-size:11px}.card.off{color:var(--mut);border-style:dashed}
 .pr{display:flex;align-items:center;gap:6px}.bar{width:56px;height:6px;background:var(--accsoft);border-radius:3px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--acc)}.pr span{font-family:var(--f-num);font-variant-numeric:tabular-nums;min-width:46px;text-align:right}
 .top{color:var(--mut);font-size:12px}.alt{margin-right:10px}.alt b{font-family:var(--f-num);font-weight:500}.alt.chosen{color:var(--fg)}
@@ -154,7 +169,7 @@ def body_html(folder: Path, data: list[tuple[int, list[dict]]]) -> str:
 <div class="nav"><button id="prev" type="button" aria-label="이전 반복">◀</button><select id="sel" aria-label="반복 고르기">{opts}</select>
 <button id="next" type="button" aria-label="다음 반복">▶</button></div>
 <div class="hint">반복마다 이긴 전투 하나, 진 전투 하나. 확률은 그 전투를 싸운 가중치로 잰 값입니다.
- 적 행동의 수치는 한 번 때리는 피해입니다 (여러 번 때리는지는 관측에 없음).</div></div></header>
+ 적 행동의 수치는 한 번 때리는 피해입니다 (여러 번 때리는지는 관측에 없음). 손패에서 점선 카드는 지금 낼 수 없는 카드, 숫자는 지금 비용입니다.</div></div></header>
 <main>{secs or '<p class="empty">아직 기록이 없습니다.</p>'}</main>
 <script>
 const sel=document.getElementById('sel');

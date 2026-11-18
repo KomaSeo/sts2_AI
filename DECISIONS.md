@@ -804,3 +804,19 @@
     - 폰 너비에서는 표만 가로로 스크롤.
   - 머리에 안내 문구를 넣었다: 적 행동 수치는 한 번 때리는 피해이고, 여러 번 때리는지는 관측에 없다.
 - 관련 파일: scripts/fights_html.py
+
+### 2026-11-18 · 전투 기록에 손패, 카드 풀에서 멀티 전용 카드 빼기
+- 출처: [사용자 지시] / 세부는 [AI 임의 결정]
+- 사용자 원문: "손패도 같이 보여주면 좋겠는데" / "멀티 전용 카드도 들어있니 혹시?" / "만약 들어 있으면 뺴다오"
+- 이유: 이유 미기재.
+- 내용
+  - 손패
+    - 행동마다 손패를 남긴다: [이름(강화면 +), 지금 비용, 지금 낼 수 있나].
+    - 보기 페이지에 손패 열을 넣었다. 지금 낼 수 없는 카드는 점선으로 표시한다. — [AI 임의 결정]
+  - 멀티 전용 카드
+    - 시뮬레이터 카드 표(Cards.g.cs)에서 MultiplayerOnly 인 카드 21 장을 _Lib.probe_card_pool 에서 뺐다.
+    - 아이언클래드·무색 풀에 있던 것은 13 장이다: Beacon Of Hope, Believe In You, Coordinate, Demonic Shield, Gang Up, Huddle Up, Intercept, Knockdown, Lift, Mimic, Rally, Tag Team, Tank.
+    - 유물·포션 표에는 이 표시가 없다.
+    - 같은 풀을 쓰는 런 학습의 모의전·변환 후보에서도 빠진다. 혼자 하는 런에는 나오지 않는 카드라서 같이 뺐다. — [AI 임의 결정]
+  - 학습: 카드 풀과 검증 전투가 바뀌어서 runs/combat_only_v2 를 반복 14 에서 끊었다. runs/combat_only_v3 에서 처음부터 다시 학습한다.
+- 관련 파일: sts2ai/envs/sts2_adapter.py, sts2ai/train/combat_only.py, scripts/fights_html.py

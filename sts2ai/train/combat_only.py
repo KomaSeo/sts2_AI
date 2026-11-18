@@ -170,6 +170,15 @@ def fight_record(policy, run, t: Trajectory, sc: Scenario, top: int = 3) -> dict
 
     enemy_names, intent_names = _name_tables(run)
 
+    def hand(o):
+        """손패: [이름(+ 강화), 지금 비용, 낼 수 있나]. 비용 칸은 비용/5."""
+        out = []
+        for ti in np.flatnonzero((o.types == S.TYPE_HAND) | (o.types == S.TYPE_HAND_LOCKED)):
+            nm = run.action_token_name(S.TYPE_HAND, int(o.ids[ti])) + ("+" if o.feats[ti, S.F_UPGRADED] > 0.5 else "")
+            playable = bool(o.types[ti] == S.TYPE_HAND and 1 <= ti <= S.MAX_ACTIONS and o.legal[ti - 1])
+            out.append([nm, int(round(float(o.feats[ti, S.F_COST]) * 5)), playable])
+        return out
+
     def enemies(o):
         """적마다 이름·HP·방어도·이번 턴 행동(의도)·다음 턴 행동. 관측 특징의 배율: HP·방어도 /50, 의도 수치 /30."""
         out = []
@@ -203,6 +212,7 @@ def fight_record(policy, run, t: Trajectory, sc: Scenario, top: int = 3) -> dict
             "energy": int(round(float(g[S.F_ENERGY]) * 10)),  # 에너지 / 10
             "block": int(round(float(g[S.F_BLOCK]) * 50)),
             "enemies": enemies(o),
+            "hand": hand(o),
             "action": name(o, a) + (f" → 적{int(o.enemy_slots[tg])}" if tg >= 0 else ""),
             "prob_pct": round(float(np.exp(lp)) * 100, 1),  # 고른 (행동, 타깃) 의 확률
             "action_prob_pct": round(float(pr[a]) * 100, 1),  # 행동만의 확률
@@ -255,6 +265,7 @@ def fight_text(rec: dict) -> str:
         alts = " / ".join(f"{n} {p}%" for n, p in st["top"])
         lines.append(f"  턴{st['turn']:>2} HP{st['hp']:>3} 방어{st.get('block', 0)} 에너지{st['energy']} | "
                      f"{' / '.join(enemy_text(e) for e in st.get('enemies', []))} | "
+                     f"손패 {', '.join(f'{n}({c})' for n, c, _ in st.get('hand', []))} | "
                      f"{st['action']} ({st['prob_pct']}%) | 상위: {alts}")
     return "\n".join(lines)
 

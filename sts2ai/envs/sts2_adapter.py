@@ -58,12 +58,18 @@ class _Lib:
 
         self.ct, self.names, self.native, self.rc, self.Sts2RunEnv = ct, names, native, rc, Sts2RunEnv
         self.run_engine = run_engine
-        # 모의전 덱에 넣을 카드 후보: 직업(아이언클래드) 카드 풀 + 무색 카드 풀 + 저주·상태이상 카드 전부.
+        # 모의전 덱에 넣을 카드 후보: 직업(아이언클래드) 카드 풀 + 무색 카드 풀 + 저주·상태이상 카드 전부 (멀티 전용 제외).
         # 직업·무색은 시뮬레이터의 생성 표(CardPools.g.cs)를 읽는다. sts2_gym.position_sampler 도 같은 표를 읽지만
         # 시스템 기본 인코딩으로 열어서 Windows(cp949)에서는 실패한다. 저주·상태이상은 카드 종류로 고른다.
         curse_status = {cid for cid, info in names.cards().items() if info.card_type in ("Curse", "Status")}
-        self.probe_card_pool = sorted(set(_card_pool(repo, "Ironclad")) | set(_card_pool(repo, "Colorless"))
-                                      | curse_status)
+        # 멀티플레이 전용 카드(Cards.g.cs 의 MultiplayerOnly)는 혼자 하는 런에 나오지 않으므로 뺀다.
+        import re  # noqa: PLC0415
+
+        cards_src = (repo / "src" / "Sts2Emulator" / "Generated" / "Cards.g.cs").read_text(encoding="utf-8")
+        self.multiplayer_only = {int(m.group(1)) for m in
+                                 re.finditer(r"CardDef\(Id: (\d+),[^\n]*MultiplayerOnly: true", cards_src)}
+        self.probe_card_pool = sorted((set(_card_pool(repo, "Ironclad")) | set(_card_pool(repo, "Colorless"))
+                                       | curse_status) - self.multiplayer_only)
         # 로컬 시뮬레이터에 추가한 함수들. 없는 빌드면 기본 비용만 쓰고 인챈트·자원 토큰을 붙이지 않는다.
         # Sts2_GetPileDetails: 카드마다 (지금 비용, 인챈트, 인챈트 수치). Sts2_GetResources: 별·오스티·오브 등.
         def bind(name, args):
