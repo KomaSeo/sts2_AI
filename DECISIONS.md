@@ -749,3 +749,17 @@
     - 같이 남기는 것: 턴, HP, 에너지, 적 HP. 적 HP 는 관측 특징(HP/100)에서 되돌린 값이라 근사다.
   - runs/combat_only_v1 은 10 반복 뒤 끊고 이 코드로 이어 달렸다.
 - 관련 파일: sts2ai/train/combat_only.py, scripts/train_combat_only.py
+
+### 2026-11-18 · 전투 기록을 HTML·Markdown 으로 보기
+- 출처: [사용자 지시] / 형식은 [AI 임의 결정]
+- 사용자 원문: "json 대신 md나 html로 보여줄 수는 없나"
+- 이유: 이유 미기재.
+- 내용
+  - scripts/fights_html.py 가 fights/iter_NNNN.json 을 모아 <폴더>/fights.html 한 장으로 만든다. --md 를 주면 반복마다 iter_NNNN.md 도 쓴다.
+  - JSON 은 원본 데이터로 계속 남긴다. 학습 코드는 그대로 두었다 (돌고 있는 학습을 끊지 않으려고). — [AI 임의 결정]
+  - 화면 — [AI 임의 결정]
+    - 반복 고르기(최신부터, ◀ ▶).
+    - 전투마다 승패 표시, 덱·포션(접기).
+    - 행동 표: 턴, HP, 에너지, 적 HP, 고른 행동, 확률 막대와 %, 확률 높은 행동 3개. 턴마다 줄 배경을 번갈아 칠한다.
+    - 다크 모드.
+- 관련 파일: scripts/fights_html.py
