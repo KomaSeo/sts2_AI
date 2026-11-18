@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
-import argparse
 import html
 import json
+import os
+import re
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -21,14 +23,61 @@ def load(folder: Path) -> list[tuple[int, list[dict]]]:
     return out
 
 
-INTENT_KO = {"Attack": "공격", "Defend": "방어", "Buff": "강화", "Debuff": "약화", "Unknown": "알 수 없음"}
+# ---- 한국어 이름 ----
+# 게임 설치 폴더의 SlayTheSpire2.pck 에서 꺼낸 localization/{eng,kor}/*.json 을 쓴다 (저장소에는 넣지 않는다).
+# 영문 제목(또는 ID)을 소문자·영숫자만 남겨 맞춘다. 폴더가 없거나 못 찾은 이름은 영문 그대로.
+LOC_DIR = Path(os.environ.get("STS2_LOC", r"C:\Users\Ic_Lab\sts2_scratch\loc"))
+_LOC_FILES = {"card": ("cards", ".title"), "relic": ("relics", ".title"), "potion": ("potions", ".title"),
+              "monster": ("monsters", ".name"), "intent": ("intents", ".title")}
+KIND_KO = {"Weak": "약한 적", "Normal": "일반", "Elite": "엘리트", "Boss": "보스"}
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+@lru_cache(maxsize=1)
+def _tables() -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for cat, (f, suffix) in _LOC_FILES.items():
+        try:
+            eng = json.loads((LOC_DIR / "eng" / f"{f}.json").read_text(encoding="utf-8"))
+            kor = json.loads((LOC_DIR / "kor" / f"{f}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        t: dict[str, str] = {}
+        for key, v in eng.items():
+            if key.endswith(suffix) and key in kor:
+                t[_norm(key[: -len(suffix)])] = kor[key]
+                t[_norm(v)] = kor[key]
+        out[cat] = t
+    return out
+
+
+def ko(cat: str, name: str) -> str:
+    """영문 이름 → 한국어. 카드의 + (강화) 는 그대로 붙인다."""
+    plus = "+" if name.endswith("+") else ""
+    base = name[:-1] if plus else name
+    return _tables().get(cat, {}).get(_norm(base), base) + plus
+
+
+def ko_action(s: str) -> str:
+    """행동 이름: "카드 → 적0", "포션: 이름 → 적0", "고르기: 카드", "턴 종료", "고르지 않기"."""
+    act, _, target = s.partition(" → ")
+    if act.startswith("포션: "):
+        act = "포션: " + ko("potion", act[len("포션: "):])
+    elif act.startswith("고르기: "):
+        act = "고르기: " + ko("card", act[len("고르기: "):])
+    elif act not in ("턴 종료", "고르지 않기"):
+        act = ko("card", act)
+    return act + (f" → {target.replace('적', '적 ')}" if target else "")
 
 
 def intent_str(x) -> str:
     if not x:
         return "?"
     kind, mag = x
-    k = INTENT_KO.get(kind, kind)
+    k = ko("intent", kind)
     return f"{k} {mag}" if mag else k
 
 
@@ -40,45 +89,53 @@ def enemies_of(s: dict) -> list[dict]:
 
 
 def enemy_str(e: dict) -> str:
-    out = f"{e['name']} HP {e['hp']}" + (f" 방어 {e['block']}" if e.get("block") else "")
+    out = f"{ko('monster', e['name'])} HP {e['hp']}" + (f" 방어 {e['block']}" if e.get("block") else "")
     if "intent" in e:
         out += f" · {intent_str(e['intent'])}" + (f" → 다음 {intent_str(e['next'])}" if e.get("next") else "")
     return out
 
 
 def hand_str(s: dict) -> str:
-    return ", ".join(f"{n}({c})" for n, c, _ in s.get("hand", [])) if "hand" in s else "-"
+    return ", ".join(f"{ko('card', n)}({c})" for n, c, _ in s.get("hand", [])) if "hand" in s else "-"
 
 
 def hand_html(s: dict) -> str:
     if "hand" not in s:
         return '<span class="na">기록 없음</span>'
-    return "".join(f'<span class="card{"" if ok else " off"}">{html.escape(n)}<i>{c}</i></span>'
-                   for n, c, ok in s["hand"]) or '<span class="na">없음</span>'
+    return "".join(f'<span class="card{"" if ok else " off"}" title="{html.escape(n)}">{html.escape(ko("card", n))}'
+                   f'<i>{c}</i></span>' for n, c, ok in s["hand"]) or '<span class="na">없음</span>'
 
 
 def who(rec: dict) -> str:
-    return ", ".join(rec.get("enemy_names") or []) or f"적 {rec['encounter']}"
+    return ", ".join(ko("monster", n) for n in rec.get("enemy_names") or []) or f"적 {rec['encounter']}"
+
+
+def kind_ko(rec: dict) -> str:
+    return KIND_KO.get(rec["kind"], rec["kind"])
+
+
+def names(cat: str, xs) -> str:
+    return ", ".join(ko(cat, x) for x in xs) or "없음"
 
 
 def head(rec: dict) -> str:
-    return (f"{'승리' if rec['won'] else '패배'} · {who(rec)} (막 {rec['sim_act']}, {rec['kind']}) · "
+    return (f"{'승리' if rec['won'] else '패배'} · {who(rec)} (막 {rec['sim_act']}, {kind_ko(rec)}) · "
             f"HP {rec['hp_start']}/{rec['max_hp']} → {rec['hp_end']} · 점수 {rec['score']}")
 
 
 def to_md(it: int, recs: list[dict]) -> str:
     lines = [f"# 반복 {it}", ""]
     for r in recs:
-        lines += [f"## {head(r)}", "", f"- 덱 {len(r['deck'])}장: " + ", ".join(r["deck"]),
-                  "- 포션: " + (", ".join(r["potions"]) or "없음"),
-                  "- 유물: " + (", ".join(r.get("relics", [])) or "없음"), "",
+        lines += [f"## {head(r)}", "", f"- 덱 {len(r['deck'])}장: " + names("card", r["deck"]),
+                  "- 포션: " + names("potion", r["potions"]),
+                  "- 유물: " + names("relic", r.get("relics", [])), "",
                   "| 턴 | HP | 방어 | 에너지 | 적 (HP · 이번 턴 행동) | 손패 (비용) | 고른 행동 | 확률 | 확률 높은 행동 3개 |",
                   "|---|---|---|---|---|---|---|---|---|"]
         for s in r["steps"]:
-            top = " / ".join(f"{n} {p}%" for n, p in s["top"])
+            top = " / ".join(f"{ko_action(n)} {p}%" for n, p in s["top"])
             lines.append(f"| {s['turn']} | {s['hp']} | {s.get('block', '')} | {s['energy']} | "
                          f"{'<br>'.join(enemy_str(e) for e in enemies_of(s))} | {hand_str(s)} | "
-                         f"{s['action']} | {s['prob_pct']}% | {top} |")
+                         f"{ko_action(s['action'])} | {s['prob_pct']}% | {top} |")
         lines.append("")
     return "\n".join(lines)
 
@@ -90,7 +147,8 @@ def fight_html(r: dict) -> str:
         if s["turn"] != prev_turn:
             band ^= 1
             prev_turn = s["turn"]
-        top = "".join(f'<span class="alt{" chosen" if n == s["action"].split(" → ")[0] else ""}">{e(n)} '
+        chosen = s["action"].split(" → ")[0]
+        top = "".join(f'<span class="alt{" chosen" if n == chosen else ""}">{e(ko_action(n))} '
                       f'<b>{p}%</b></span>' for n, p in s["top"])
         p = s["prob_pct"]
         rows.append(
@@ -98,16 +156,16 @@ def fight_html(r: dict) -> str:
             f'<td class="n">{s.get("block", "")}</td><td class="n">{s["energy"]}</td>'
             f'<td class="en">{"<br>".join(e(enemy_str(x)) for x in enemies_of(s))}</td>'
             f'<td class="hand">{hand_html(s)}</td>'
-            f'<td class="act">{e(s["action"])}</td>'
+            f'<td class="act" title="{e(s["action"])}">{e(ko_action(s["action"]))}</td>'
             f'<td class="pr"><div class="bar"><i style="width:{min(100, p)}%"></i></div><span>{p}%</span></td>'
             f'<td class="top">{top}</td></tr>')
     cls = "win" if r["won"] else "loss"
     return f"""<section class="fight {cls}">
-<h3><span class="tag">{'승리' if r['won'] else '패배'}</span> {e(who(r))} · 막 {r['sim_act']} · {e(r['kind'])}
+<h3><span class="tag">{'승리' if r['won'] else '패배'}</span> {e(who(r))} · 막 {r['sim_act']} · {e(kind_ko(r))}
  <small>HP {r['hp_start']}/{r['max_hp']} → {r['hp_end']} · 점수 {r['score']} · 행동 {len(r['steps'])}번</small></h3>
 <details><summary>덱 {len(r['deck'])}장 · 포션 {len(r['potions'])}개 · 유물 {len(r.get('relics', []))}개</summary>
-<p>{e(', '.join(r['deck']))}</p><p>포션: {e(', '.join(r['potions']) or '없음')}</p>
-<p>유물: {e(', '.join(r.get('relics', [])) or '없음')}</p></details>
+<p>{e(names('card', r['deck']))}</p><p>포션: {e(names('potion', r['potions']))}</p>
+<p>유물: {e(names('relic', r.get('relics', [])))}</p></details>
 <div class="scroll"><table><thead><tr><th>턴</th><th>HP</th><th>방어</th><th>에너지</th><th>적 (HP · 이번 턴 행동)</th><th>손패 (비용)</th><th>고른 행동</th>
 <th>확률</th><th>확률 높은 행동 3개</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>"""
 
