@@ -532,6 +532,12 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
             _save({"policy": sd, "opt": opt.state_dict(), "history": history, "death": death.tolist(),
                    "next_iter": it + 1, "rng": rng.bit_generator.state, "config": asdict(cfg)}, ck)
             (out / "history.json").write_text(json.dumps(history, indent=1))
+            try:  # 학습 추이 그래프(progress.html)도 다시 쓴다. 실패해도 학습은 계속한다
+                from .progress_view import write_progress  # noqa: PLC0415
+
+                write_progress(out)
+            except Exception as exc:  # noqa: BLE001
+                log(f"  progress.html 을 쓰지 못했다: {exc!r}")
             (out / "death_rate.json").write_text(json.dumps(
                 {f"{e}@{a}:{k}": round(float(d), 3) for (e, a, k), d in zip(pool, death)}, indent=1))
     finally:
