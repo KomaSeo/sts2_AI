@@ -651,7 +651,8 @@ class Sts2Run:
 
     def start_probe(self, seed: int, deck: list[tuple[int, bool]], encounter: int, hp: int,
                     combats_before: int, relics: list[int] | None = None,
-                    max_hp: int | None = None, potions: list[int] | None = None) -> "Sts2Run | None":
+                    max_hp: int | None = None, potions: list[int] | None = None,
+                    potion_slots: int | None = None) -> "Sts2Run | None":
         """런을 복제(숨은 난수는 seed 로 재추첨)한 뒤, 그 복제본에서 덱을 바꿔 encounter 와의 전투를 바로 시작한다.
 
         유물(relics)·최대 HP(max_hp)·포션(potions) 을 주지 않으면 지금 런 그대로. 골드는 지금 런 그대로.
@@ -663,8 +664,12 @@ class Sts2Run:
         relics = [int(r["relic_id"]) for r in info["relic_slots"]] if relics is None else [int(r) for r in relics]
         max_hp = int(info["player_max_hp"]) if max_hp is None else int(max_hp)
         pots = [int(p) for p in info["potions"] if p] if potions is None else [int(p) for p in potions]
-        if potions is not None and len(pots) > 0:
-            # 쓸 수 있는 포션 칸을 준 포션 수만큼 (시뮬레이터 칸 수 한계 PotionSlotCapacity 안에서)
+        if potion_slots is not None:
+            # 쓸 수 있는 포션 칸 (최대 포션 수). 엔트로피 포션 등이 빈 칸을 채운다. 포션 수보다 작으면 포션 수로.
+            c.lib.native.run_debug_set_player(c.env._run_handle, c.env._run_obs_buf,  # noqa: SLF001
+                                              max_potion_slots=max(int(potion_slots), len(pots)))
+        elif potions is not None and len(pots) > 0:
+            # 예전 방식: 쓸 수 있는 포션 칸을 준 포션 수만큼 (시뮬레이터 칸 수 한계 PotionSlotCapacity 안에서)
             c.lib.native.run_debug_set_player(c.env._run_handle, c.env._run_obs_buf,  # noqa: SLF001
                                               max_potion_slots=len(pots))
         status = c.lib.native.run_start_combat(

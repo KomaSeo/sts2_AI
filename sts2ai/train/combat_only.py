@@ -61,6 +61,10 @@ class CombatConfig:
     # special_max > 0 이면 확률 대신 special_min~special_max 장을 고르게 (겹침 허용)
     special_min: int = 0
     special_max: int = 0
+    # 포션 방식. "bands" = potion_bands 확률 구간, 칸 = 포션 수. "slots" = 유물로 최대 칸(기본 3 + 포션 벨트 2 + 약병 홀스터 1
+    #   + 연금술 금고 4, 최대 9)을 정하고 포션 수는 0~최대 칸 고르게. potion_pool_ironclad 면 다른 직업 포션을 뺀다
+    potion_scheme: str = "bands"
+    potion_pool_ironclad: bool = False
     # 고대의 존재 유물을 고르면 그 유물이 주는 카드를 덱에 넣고, 그 카드들은 무작위 풀에서 뺀다 (relic_cards.py)
     relic_cards: bool = False
     # 포션 개수: "최소-최대:확률" 구간을 확률로 고른 뒤 구간 안에서 고르게. 쓸 수 있는 칸을 포션 수만큼 늘린다 (시뮬레이터 칸 9)
@@ -111,6 +115,7 @@ class Scenario:
     potions: list[int]
     seed: int
     relics: list[int] = field(default_factory=list)
+    potion_slots: int | None = None  # 최대 포션 칸. None = 예전 방식(포션 수만큼)
 
 
 def combat_pool(run) -> list[tuple[int, int, str]]:
@@ -150,8 +155,28 @@ def curse_pool(run) -> list[int]:
                   if (info := run.lib.cards.get(c)) is not None and info.card_type == "Curse")
 
 
-def potion_pool(run) -> list[int]:
-    return sorted(run.lib.potion_index)
+def potion_pool(run, ironclad_only: bool = False) -> list[int]:
+    """시작 포션 후보. ironclad_only 면 공용 + 아이언클래드 + 어느 목록에도 없는 이벤트 포션 (다른 직업 포션 제외)."""
+    if not ironclad_only:
+        return sorted(run.lib.potion_index)
+    import re  # noqa: PLC0415
+
+    text = (run.lib.repo / "src" / "Sts2Emulator" / "Generated" / "PotionPools.g.cs").read_text(encoding="utf-8")
+    pools = {n: {int(x) for x in re.findall(r"\d+", b)} for n, b in re.findall(r"(\w+) =>\s*\[([^\]]*)\]", text)}
+    other = set().union(*(v for k, v in pools.items() if k not in ("Shared", "Ironclad")))
+    return sorted(p for p in run.lib.potion_index if p not in other)
+
+
+# 최대 포션 칸: 아이언클래드 승천 0 기본 3 칸 + 유물 (RunNonCombatEffects.cs: 포션 벨트 +2, 약병 홀스터 +1,
+# 연금술 금고 +4). 시뮬레이터 칸 수 한계 9.
+BASE_POTION_SLOTS = 3
+POTION_SLOT_RELICS = {"PotionBelt": 2, "PhialHolster": 1, "AlchemicalCoffer": 4}
+MAX_POTION_SLOTS = 9
+
+
+def potion_slots_for(run, relics) -> int:
+    names = {rid: n.replace(" ", "") for rid, n in run.lib.names.relics().items()}
+    return min(MAX_POTION_SLOTS, BASE_POTION_SLOTS + sum(POTION_SLOT_RELICS.get(names.get(r, ""), 0) for r in relics))
 
 
 def parse_bands(spec: str) -> list[tuple[int, int, float]]:
@@ -204,7 +229,7 @@ def sample_act_relics(rng: np.random.Generator, act: int, relic_pool, ancients: 
 
 def sample_scenario(rng: np.random.Generator, cfg: CombatConfig, cards, pots, enc: tuple[int, int, str],
                     relic_pool=(), starters: list[tuple[int, int, int]] = (), ancients: dict | None = None,
-                    curses=(), specials=(), relic_cards=None) -> Scenario:
+                    curses=(), specials=(), relic_cards=None, run_for_slots=None) -> Scenario:
     """starters 를 주면 그 카드들을 먼저 넣고, 나머지는 cards 에서 starters 를 뺀 풀로 채운다."""
     ids = [cid for cid, lo, hi in starters for _ in range(int(rng.integers(lo, hi + 1)))]
     fill_pool = [c for c in cards if c not in {s[0] for s in starters}] if starters else list(cards)
@@ -239,7 +264,13 @@ def sample_scenario(rng: np.random.Generator, cfg: CombatConfig, cards, pots, en
         relics = sorted(int(r) for r in rng.choice(relic_pool, n_rel, replace=False)) if n_rel else []
     if relic_cards is not None and relics:
         deck, max_hp, hp, _ = relic_cards.apply(deck, relics, max_hp, hp, rng)
-    return Scenario(enc[0], enc[1], enc[2], deck, hp, max_hp, potions, seed, relics)
+    slots = None
+    if getattr(cfg, "potion_scheme", "bands") == "slots" and run_for_slots is not None:
+        # 유물로 최대 칸을 정한 뒤 포션 수 0~최대 칸 (위 potion_bands 로 뽑은 포션은 버린다)
+        slots = potion_slots_for(run_for_slots, relics)
+        n_pot = int(rng.integers(0, slots + 1))
+        potions = [int(p) for p in rng.choice(pots, n_pot)] if n_pot else []
+    return Scenario(enc[0], enc[1], enc[2], deck, hp, max_hp, potions, seed, relics, slots)
 
 
 def scenario_pools(run, cfg) -> dict:
@@ -253,7 +284,8 @@ def scenario_pools(run, cfg) -> dict:
         cards = [c for c in cards if c not in rc.reserved]
         curses = [c for c in curses if c not in rc.reserved]
         specials = [c for c in specials if c not in rc.reserved]
-    return {"cards": cards, "pots": potion_pool(run), "relic_pool": run.relic_pool(),
+    return {"cards": cards, "pots": potion_pool(run, getattr(cfg, "potion_pool_ironclad", False)),
+            "relic_pool": run.relic_pool(), "run": run,
             "starters": parse_starters(cfg.starter_cards, {i.name: c for c, i in run.lib.cards.items()}),
             "ancients": run.ancient_relic_pools() if getattr(cfg, "relic_scheme", "uniform") == "acts" else None,
             "curses": curses, "specials": specials, "relic_cards": rc}
@@ -261,7 +293,7 @@ def scenario_pools(run, cfg) -> dict:
 
 def scenario_from(rng, cfg, P: dict, enc) -> Scenario:
     return sample_scenario(rng, cfg, P["cards"], P["pots"], enc, P["relic_pool"], P["starters"], P["ancients"],
-                           P["curses"], P["specials"], P["relic_cards"])
+                           P["curses"], P["specials"], P["relic_cards"], P.get("run"))
 
 
 def start_combat(run, sc: Scenario):
@@ -269,7 +301,7 @@ def start_combat(run, sc: Scenario):
     from ..envs.sts2_adapter import Sts2RunCombatFork  # noqa: PLC0415
 
     p = run.start_probe(sc.seed, sc.deck, sc.encounter, sc.hp, 0, relics=sc.relics, max_hp=sc.max_hp,
-                        potions=sc.potions)
+                        potions=sc.potions, potion_slots=sc.potion_slots)
     return None if p is None else Sts2RunCombatFork(p)
 
 
@@ -377,6 +409,7 @@ def fight_record(policy, run, t: Trajectory, sc: Scenario, top: int = 3) -> dict
             "deck": [run.lib.names.spaced(run.lib.cards[c].name) + ("+" if up else "") if c in run.lib.cards
                      else str(c) for c, up in sc.deck],
             "potions": [run.lib.names.spaced(run.lib.names.potions().get(p, str(p))) for p in sc.potions],
+            "potion_slots": sc.potion_slots,
             "relics": [run.lib.names.spaced(run.lib.names.relics().get(r, str(r))) for r in sc.relics],
             "steps": steps}
 

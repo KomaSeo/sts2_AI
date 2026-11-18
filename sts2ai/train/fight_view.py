@@ -161,7 +161,7 @@ def to_md(it: int, recs: list[dict]) -> str:
     lines = [f"# 반복 {it}", ""]
     for r in recs:
         lines += [f"## {head(r)}", "", f"- 덱 {len(r['deck'])}장: " + names("card", r["deck"]),
-                  "- 포션: " + names("potion", r["potions"]),
+                  "- 포션: " + names("potion", r["potions"]) + (f" ({r['potion_slots']}칸)" if r.get("potion_slots") else ""),
                   "- 유물: " + names("relic", r.get("relics", [])), "",
                   "| 턴 | HP | 방어 | 에너지 | 적 (HP · 이번 턴 행동) | 손패 (비용) | 고른 행동 | 확률 | 확률 높은 행동 3개 |",
                   "|---|---|---|---|---|---|---|---|---|"]
@@ -197,7 +197,7 @@ def fight_html(r: dict) -> str:
     return f"""<section class="fight {cls}">
 <h3><span class="tag">{'승리' if r['won'] else '패배'}</span> {e(who(r))} · {e(act_label(r))} · {e(kind_ko(r))}
  <small>HP {r['hp_start']}/{r['max_hp']} → {r['hp_end']} · 점수 {r['score']} · 행동 {len(r['steps'])}번</small></h3>
-<details><summary>덱 {len(r['deck'])}장 · 포션 {len(r['potions'])}개 · 유물 {len(r.get('relics', []))}개</summary>
+<details><summary>덱 {len(r['deck'])}장 · 포션 {len(r['potions'])}개{f" / {r['potion_slots']}칸" if r.get('potion_slots') else ""} · 유물 {len(r.get('relics', []))}개</summary>
 <p>{e(names('card', r['deck']))}</p><p>포션: {e(names('potion', r['potions']))}</p>
 <p>유물: {e(names('relic', r.get('relics', [])))}</p></details>
 <div class="scroll"><table><thead><tr><th>턴</th><th>HP</th><th>방어</th><th>에너지</th><th>적 (HP · 이번 턴 행동)</th><th>손패 (비용)</th><th>고른 행동</th>

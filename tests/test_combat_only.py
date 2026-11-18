@@ -172,3 +172,17 @@ def test_act_deck_no_top_up_by_default():
         curses.append(ids.count(90))
     assert min(sizes) < 5  # 5 장 미만도 그대로 둔다
     assert max(curses) <= 3
+
+
+def test_potion_slots_from_relics():
+    from types import SimpleNamespace
+
+    from sts2ai.train.combat_only import potion_slots_for
+
+    names = {1: "Potion Belt", 2: "Phial Holster", 3: "Alchemical Coffer", 4: "Anchor"}
+    run = SimpleNamespace(lib=SimpleNamespace(names=SimpleNamespace(relics=lambda: names)))
+    assert potion_slots_for(run, []) == 3
+    assert potion_slots_for(run, [4]) == 3
+    assert potion_slots_for(run, [1]) == 5
+    assert potion_slots_for(run, [1, 2]) == 6
+    assert potion_slots_for(run, [1, 2, 3]) == 9  # 3 + 2 + 1 + 4 = 10 → 시뮬레이터 한계 9
