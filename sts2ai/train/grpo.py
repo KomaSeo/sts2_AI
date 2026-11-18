@@ -358,10 +358,25 @@ def grpo_update(
     stats = {"loss": 0.0, "entropy": 0.0, "clip_frac": 0.0, "ent_norm": 0.0, "below_floor": 0.0}
     n_batches = 0
     dev = module_device(policy)
-    for _ in range(epochs):
-        perm = np.random.permutation(len(steps))
-        for start in range(0, len(steps), minibatch):
-            chunk = [steps[i] for i in perm[start : start + minibatch]]
+    stats["oom_splits"] = 0
+
+    def run_chunk(chunk) -> None:
+        """미니배치 하나로 한 번 업데이트. GPU 메모리가 모자라면 반으로 나눠 다시 한다 (각 반쪽이 한 번씩 업데이트)."""
+        try:
+            update_chunk(chunk)
+        except Exception as exc:  # noqa: BLE001 — torch 버전마다 OOM 예외 종류가 다르다
+            if "out of memory" not in str(exc) or len(chunk) <= 1 or dev.type != "cuda":
+                raise
+            optim.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            stats["oom_splits"] += 1
+            half = len(chunk) // 2
+            run_chunk(chunk[:half])
+            run_chunk(chunk[half:])
+
+    def update_chunk(chunk) -> None:
+        nonlocal n_batches
+        if True:
             batch = to_device(collate_combat([c[0] for c in chunk]), dev)
             a = torch.tensor([c[1] for c in chunk], device=dev)
             tg = torch.tensor([c[2] for c in chunk], device=dev)
@@ -404,7 +419,16 @@ def grpo_update(
             stats["entropy"] += float(ent.mean().detach())
             stats["clip_frac"] += float(((ratio - 1).abs() > clip).float().mean())
             n_batches += 1
+
+    for _ in range(epochs):
+        perm = np.random.permutation(len(steps))
+        for start in range(0, len(steps), minibatch):
+            run_chunk([steps[i] for i in perm[start : start + minibatch]])
+    oom_splits = stats.pop("oom_splits")
     out = {k: v / max(1, n_batches) for k, v in stats.items()}
+    out["oom_splits"] = oom_splits
+    if dev.type == "cuda":
+        torch.cuda.empty_cache()  # 다음 수집 때 추론 서버가 쓸 GPU 메모리를 돌려준다
     out["grpo_steps"] = len(steps)
     out["grpo_trajs"] = n_traj
     return out

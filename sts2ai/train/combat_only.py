@@ -89,6 +89,7 @@ class CombatConfig:
     amp: bool = False  # 학습 업데이트를 GPU 에서 bf16 으로 (큰 모델용, 약 2 배 빠르고 메모리 40% 적게)
     lr_policy: float = 3e-4
     grpo_epochs: int = 2
+    minibatch: int = 256  # 업데이트 미니배치 (GPU 메모리가 모자라면 grpo_update 가 반으로 나눠 다시 한다)
     # 엔트로피 하한: 행동이 2 개 이상인 스텝마다 H/log(행동 수) 가 이 값 아래로 가면 벌점 (0 = 끔)
     ent_floor: float = 0.0
     ent_floor_coef: float = 1.0
@@ -688,7 +689,8 @@ def train_combat_only(repo: str, cfg: CombatConfig, log=print) -> CombatPolicy:
                 log(f"  fights.html 을 쓰지 못했다: {exc!r}")
             policy.train()
             row.update(grpo_update(policy, opt, [g for g in groups if len(g) > 1], epochs=cfg.grpo_epochs,
-                                   ent_floor=cfg.ent_floor, ent_floor_coef=cfg.ent_floor_coef, amp=cfg.amp))
+                                   ent_floor=cfg.ent_floor, ent_floor_coef=cfg.ent_floor_coef, amp=cfg.amp,
+                                   minibatch=cfg.minibatch))
             runner.sync(policy)
             if cfg.eval_every and ((it + 1) % cfg.eval_every == 0 or it + 1 == cfg.iterations):
                 evaluate(row)
