@@ -1251,3 +1251,7 @@
   - v18 은 반복 88 에서 멈춰 있었다(돌아가는 프로세스 없음, 오류 기록 없음). runs/combat_only_v19 에서 처음부터 학습한다.
   - 반복마다 전투 수가 156 × 8 = 1248 에서 156 × 128 = 19968 로 16 배라 반복 하나가 그만큼 길어진다.
 - 관련 파일: runs/combat_only_v19 (실행 설정 config.json)
+- 덧붙임 (같은 날): v19 첫 시작이 반복 0 에서 "Sts2Run_Clone failed: the pool is full" 로 멈췄다.
+  - 원인: 시뮬레이터 핸들 한도는 프로세스당 256 이다 (RunNativeExports.cs `_pool = new RunEngine?[256]`). 워커가 시나리오 4 개를 한 번에 받아 각각 128 번 복제하면 512 개가 필요하다.
+  - 고침: 코드는 그대로 두고 실행 인자 --scenarios-per-task 1 을 더했다 (복제 128 + 원본 < 256). 워커 한 배치는 128 갈래로 예전(4 × 8 = 32)보다 크다. — [AI 임의 결정]
+  - 실패 기록은 runs/combat_only_v19.crash1.err / .crash1.log 로 옮기고 runs/combat_only_v19 를 지운 뒤 처음부터 다시 시작했다.
